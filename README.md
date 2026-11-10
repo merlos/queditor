@@ -64,7 +64,10 @@ entering the UI. `queditor --help` shows CLI options.
 - Select text in the editor, switch to chat, and use `/attach` to pin a snapshot.
 - Use `/mode chat` for read-only discussion or `/mode agent` for full-document staged edits.
 - `/demo` creates a deterministic uppercase proposal, not an AI response.
-- **A/Enter** accepts a proposal; **R/Esc** rejects it. **Ctrl+Z** undoes acceptance.
+- **Alt+[ / Alt+]** navigates agent changes; **Ctrl+Enter** keeps one and
+  **Ctrl+Backspace** rejects one in terminals with enhanced-keyboard support.
+  `/changes keep` and `/changes reject` are portable alternatives. **Ctrl+Z**
+  undoes accepted changes.
 - `/rewrite "replacement text"` previews a replacement for selection/context,
   or the whole document when neither is present.
 - `/help` lists commands; `/keys` shows the current editing bindings.
@@ -99,8 +102,8 @@ Use a model available to your account; tool/stream support varies by model.
 Chat mode answers and suggests without staging changes. In Agent mode the model may
 propose a complete replacement for the open document; selections remain important
 context rather than edit boundaries. Editing while it runs is allowed and stale
-results are rejected. Live proposals require Ctrl+R, then diff blocks can be
-included individually or accepted together. Escape always cancels active agent
+results are rejected. Proposed changes appear as a non-modal editor overlay and can
+be kept/rejected individually or together. Escape always cancels active agent
 work; `/cancel` and Ctrl+C in chat remain available.
 
 See [provider setup and privacy](docs/live-ai.md) for authentication, custom
@@ -110,8 +113,8 @@ endpoints, permissions, sessions, and recovery details.
 
 - Copy/cut shortcuts use **Queditor's internal clipboard**, not the OS clipboard.
   Your terminal's paste action is supported and never submits pasted newlines.
-- One document and one modal proposal at a time; reject/accept before editing again.
-- No soft wrapping in the editor or per-hunk acceptance. Recovery checkpoints
+- One document and one proposal at a time; manual edits safely close stale review.
+- Recovery checkpoints
   run approximately once a second after changes; the latest uncheckpointed input
   can still be lost. Saved session history is disabled by default.
 - UTF-8 only; files over 8 MiB and files containing NUL bytes are rejected.

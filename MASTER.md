@@ -33,7 +33,7 @@ the stated subset exists, and **Planned** means not yet delivered.
 | AGENT-001 | Built-in agents | Implemented: selected Planner/Blogger/custom instructions are sent as the live system prompt. |
 | AGENT-002 | Custom agents | Implemented: YAML-frontmatter Markdown definitions; invalid files warn without dropping valid definitions. |
 | SAFE-001 | Proposal separation | Implemented: per-agent read-only Chat and full-document Agent modes; structured proposals require successful completion and explicit diff review. |
-| SAFE-002 | Review | Implemented: modal diff-block include/exclude plus accept/reject all, stale revision/original validation, atomic acceptance is undoable and unsaved. |
+| SAFE-002 | Review | Implemented: non-modal proposed-document preview with inline replacement highlighting and bottom acceptance controls, enhanced-keyboard and command-based individual keep/reject plus keep/reject all, stale revision/original validation, atomic acceptance is undoable and unsaved. |
 | SAFE-003 | Save accepted text only | Implemented: a save never includes an unaccepted proposal. |
 | SAFE-004 | Agent file permissions | Implemented: read/list ask-by-default; once/session/saved exact-path grants, revocation, sensitive exclusions, anchored capabilities and size limits; no shell/writes. |
 | CFG-001 | YAML defaults | Partial: embedded defaults, validated provider profiles, environment/keyring/private-file credential references, safe atomic updates and fallback warnings; CLI overrides pending. |

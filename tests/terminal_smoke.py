@@ -44,6 +44,8 @@ class TerminalApp:
         self.screen_pending = ""
         self.decoder = codecs.getincrementaldecoder("utf-8")("replace")
         self.wait_for(backend)
+        if b"\x1b[>1u" not in self.output:
+            raise AssertionError("Editor did not enable enhanced keyboard reporting")
 
     def feed(self, data):
         """Minimal VT cursor/screen tracking: Ratatui emits diffs, not full text lines."""
@@ -57,11 +59,11 @@ class TerminalApp:
                 if index + 1 >= len(text):
                     break
                 if text[index + 1] == "[":
-                    match = re.match(r"\x1b\[([0-9;?]*)([A-Za-z~])", text[index:])
+                    match = re.match(r"\x1b\[([0-9;?>]*)([A-Za-z~])", text[index:])
                     if not match:
                         break
                     parameters, command = match.groups()
-                    values = [int(p or "0") for p in parameters.lstrip("?").split(";")]
+                    values = [int(p or "0") for p in parameters.lstrip("?>").split(";")]
                     if command in "Hf":
                         self.screen_row = max(0, (values[0] or 1) - 1)
                         self.screen_col = max(0, ((values[1] if len(values) > 1 else 1) or 1) - 1)
@@ -141,8 +143,8 @@ class SmokeTests(unittest.TestCase):
     def test_mock_review_accept_undo_and_save(self):
         with tempfile.TemporaryDirectory(prefix="queditor-smoke-") as directory:
             doc, app = self.launch(directory, width=80)
-            app.send(b"hello\t/demo\r", b"MOCK PROPOSAL")
-            app.send(b"a", b"Proposal accepted")
+            app.send(b"hello\t/demo\r", b"Agent change 1 of 1")
+            app.send(b"\x1b[13;5u", b"Proposal accepted")
             app.send(b"\x13", b"Saved")
             self.assertEqual(doc.read_text(), "HELLO")
             app.send(b"\t\x1a", b"hello")
@@ -393,13 +395,12 @@ class LiveSmokeTests(unittest.TestCase):
             app.send(b"revise\r", b"Agent file permission")
             self.assertEqual(len(provider.requests), 1)
             self.assertNotIn("approved tool context", json.dumps(provider.requests))
-            app.send(b"o", b"AGENT PROPOSAL")
+            app.send(b"o", b"Agent change 1 of 1")
             self.assertEqual(doc.read_text(), "helloUNATTACHED_SECRET")
             self.assertIn("UNATTACHED_SECRET", json.dumps(provider.requests))
             self.assertIn("propose_edit", [tool["function"]["name"] for tool in provider.requests[0].get("tools", [])])
             self.assertIn("approved tool context", json.dumps(provider.requests))
-            app.send(b"\x12", b"Review enabled")
-            app.send(b"a", b"Proposal accepted")
+            app.send(b"\x1b[13;5u", b"Proposal accepted")
             app.send(b"\x13", b"Saved")
             app.send(b"\x11")
             app.finish()

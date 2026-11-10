@@ -36,6 +36,10 @@ pub const COMMANDS: &[(&str, &str)] = &[
     ("/theme", "Choose mocha or daylight"),
     ("/agents", "Select agent: /agents [name]"),
     ("/mode", "Set agent mode: /mode chat|agent"),
+    (
+        "/changes",
+        "Review changes: next|prev|keep|reject|keep-all|reject-all",
+    ),
     ("/attach", "Attach selection, document, or clear"),
     ("/demo", "Mock uppercase edit proposal"),
     ("/rewrite", "Mock proposal: /rewrite <replacement text>"),
@@ -83,6 +87,7 @@ pub struct ProposalHunk {
     pub original: String,
     pub replacement: String,
     pub included: bool,
+    pub resolved: bool,
 }
 pub struct Entry {
     pub path: PathBuf,
@@ -125,7 +130,6 @@ pub struct App {
     pub agent: usize,
     pub attachment: Option<Attachment>,
     pub proposal: Option<Proposal>,
-    pub review_armed: bool,
     pub explorer: Option<Explorer>,
     pub pending: Option<Pending>,
     pub status: String,
@@ -272,7 +276,6 @@ impl App {
             agent: 0,
             attachment: None,
             proposal: None,
-            review_armed: false,
             explorer: None,
             pending: None,
             status: "Tab switches panes · Ctrl+S saves · Ctrl+Q exits · /help in chat".into(),
@@ -381,62 +384,7 @@ impl App {
             self.permission_key(key);
             return;
         }
-        if self.proposal.is_some() {
-            // Live output can arrive while the user is typing: a queued ordinary
-            // letter/Enter must not accept an unseen proposal.
-            if self.proposal.as_ref().is_some_and(|p| !p.mock) && !self.review_armed {
-                if ctrl && key.code == KeyCode::Char('r') {
-                    self.review_armed = true;
-                    self.notify(
-                        Level::Info,
-                        "Review enabled · ↑/↓ blocks · Space toggles · Enter applies included · A all · R/Esc rejects",
-                    );
-                    return;
-                }
-                if matches!(key.code, KeyCode::Char('a') | KeyCode::Enter) {
-                    return;
-                }
-            }
-            match key.code {
-                KeyCode::Char('a') => {
-                    if let Some(proposal) = &mut self.proposal {
-                        for hunk in &mut proposal.hunks {
-                            hunk.included = true;
-                        }
-                    }
-                    self.accept_proposal();
-                }
-                KeyCode::Enter => self.accept_proposal(),
-                KeyCode::Char(' ') => {
-                    if let Some(proposal) = &mut self.proposal
-                        && let Some(hunk) = proposal.hunks.get_mut(proposal.active_hunk)
-                    {
-                        hunk.included = !hunk.included;
-                    }
-                }
-                KeyCode::Char('r') | KeyCode::Esc => {
-                    self.proposal = None;
-                    self.editor_scroll = 0;
-                    self.follow_editor = true;
-                    self.notify(Level::Info, "Proposal rejected; document unchanged");
-                }
-                KeyCode::Up => {
-                    if let Some(proposal) = &mut self.proposal {
-                        proposal.active_hunk = proposal.active_hunk.saturating_sub(1);
-                        self.editor_scroll = 0;
-                    }
-                }
-                KeyCode::Down => {
-                    if let Some(proposal) = &mut self.proposal {
-                        proposal.active_hunk =
-                            (proposal.active_hunk + 1).min(proposal.hunks.len().saturating_sub(1));
-                        self.editor_scroll = 0;
-                    }
-                }
-                KeyCode::PageUp => self.editor_scroll = self.editor_scroll.saturating_sub(10),
-                KeyCode::PageDown => self.editor_scroll += 10,
-                _ => {}
-            }
+        if self.proposal.is_some() && self.change_review_key(key) {
             return;
         }
         if key.code == KeyCode::Tab {
@@ -483,6 +431,12 @@ impl App {
             || self.document.anchor.is_some() && self.config.keybindings == "emacs";
         let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
         if let Some(action) = self.bindings.editor.get(&key_name(key)).cloned() {
+            if matches!(
+                action.as_str(),
+                "delete" | "backspace" | "kill_line" | "cut" | "paste" | "undo" | "redo"
+            ) {
+                self.discard_proposal_for_manual_edit();
+            }
             self.editor_action(&action, shift);
             self.follow_editor = true;
             return;
@@ -513,15 +467,25 @@ impl App {
                 };
                 self.document.move_to(p, shift);
             }
-            KeyCode::Backspace => self.document.backspace(),
-            KeyCode::Delete => self.document.delete(),
-            KeyCode::Enter => self.document.insert("\n"),
+            KeyCode::Backspace => {
+                self.discard_proposal_for_manual_edit();
+                self.document.backspace();
+            }
+            KeyCode::Delete => {
+                self.discard_proposal_for_manual_edit();
+                self.document.delete();
+            }
+            KeyCode::Enter => {
+                self.discard_proposal_for_manual_edit();
+                self.document.insert("\n");
+            }
             KeyCode::Esc => self.document.anchor = None,
             KeyCode::Char(c)
                 if !key
                     .modifiers
                     .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) =>
             {
+                self.discard_proposal_for_manual_edit();
                 self.document.insert(&c.to_string())
             }
             _ => {}
@@ -659,10 +623,11 @@ impl App {
             self.connect_paste(text);
             return;
         }
-        if self.pending.is_some() || self.proposal.is_some() || self.model_picker.is_some() {
+        if self.pending.is_some() || self.model_picker.is_some() {
             return;
         }
         if self.focus == Focus::Editor {
+            self.discard_proposal_for_manual_edit();
             self.document.insert(text);
             self.follow_editor = true;
         } else if self.explorer.is_none() {
@@ -843,6 +808,15 @@ impl App {
                 };
                 self.select_agent_mode(mode)?;
             }
+            "/changes" => match arg {
+                Some("next") => self.select_next_change(),
+                Some("prev") => self.select_previous_change(),
+                Some("keep") => self.accept_current_change(),
+                Some("reject") => self.reject_current_change(),
+                Some("keep-all") => self.keep_all_changes(),
+                Some("reject-all") => self.reject_proposal(),
+                _ => bail!("Usage: /changes next|prev|keep|reject|keep-all|reject-all"),
+            },
             "/attach" => {
                 if arg == Some("clear") {
                     self.attachment = None;
@@ -911,11 +885,10 @@ impl App {
                     original,
                     replacement,
                 ));
-                self.review_armed = true;
                 self.editor_scroll = 0;
                 self.notify(
                     Level::Info,
-                    "Mock proposal: A/Enter accepts · R/Esc rejects · save excludes pending edits",
+                    "Mock changes ready · Alt+[ / Alt+] navigate · Ctrl+Enter keeps · Ctrl+Backspace rejects",
                 );
             }
             "/find" => {
@@ -942,6 +915,7 @@ impl App {
                 if args.len() != 3 || args[1].is_empty() {
                     bail!("Usage: /replace <old> <new> (quote spaces)");
                 }
+                self.discard_proposal_for_manual_edit();
                 let result = self.document.text.replace(&args[1], &args[2]);
                 self.document.replace(0..self.document.text.len(), &result);
                 self.follow_editor = true;
@@ -1405,6 +1379,122 @@ impl App {
         self.follow_editor = true;
     }
 
+    fn change_review_key(&mut self, key: KeyEvent) -> bool {
+        let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+        let alt = key.modifiers.contains(KeyModifiers::ALT);
+        match key.code {
+            KeyCode::Char(']') if alt => self.select_next_change(),
+            KeyCode::Char('[') if alt => self.select_previous_change(),
+            KeyCode::Enter if ctrl => self.accept_current_change(),
+            KeyCode::Backspace if ctrl => self.reject_current_change(),
+            _ => return false,
+        }
+        true
+    }
+
+    fn select_next_change(&mut self) {
+        let selected = if let Some(proposal) = &mut self.proposal {
+            proposal.active_hunk = (proposal.active_hunk + 1) % proposal.hunks.len().max(1);
+            Some((proposal.active_hunk + 1, proposal.hunks.len()))
+        } else {
+            None
+        };
+        if let Some((active, total)) = selected {
+            self.focus = Focus::Editor;
+            self.follow_editor = true;
+            self.notify(
+                Level::Info,
+                format!(
+                    "Change {} of {} · Ctrl+Enter keep · Ctrl+Backspace reject",
+                    active, total
+                ),
+            );
+        }
+    }
+
+    fn select_previous_change(&mut self) {
+        let selected = if let Some(proposal) = &mut self.proposal {
+            proposal.active_hunk = proposal
+                .active_hunk
+                .checked_sub(1)
+                .unwrap_or_else(|| proposal.hunks.len().saturating_sub(1));
+            Some((proposal.active_hunk + 1, proposal.hunks.len()))
+        } else {
+            None
+        };
+        if let Some((active, total)) = selected {
+            self.focus = Focus::Editor;
+            self.follow_editor = true;
+            self.notify(
+                Level::Info,
+                format!(
+                    "Change {} of {} · Ctrl+Enter keep · Ctrl+Backspace reject",
+                    active, total
+                ),
+            );
+        }
+    }
+
+    fn accept_current_change(&mut self) {
+        self.resolve_current_change(true);
+    }
+
+    fn reject_current_change(&mut self) {
+        self.resolve_current_change(false);
+    }
+
+    fn resolve_current_change(&mut self, included: bool) {
+        let complete = if let Some(proposal) = &mut self.proposal {
+            if let Some(hunk) = proposal.hunks.get_mut(proposal.active_hunk) {
+                hunk.included = included;
+                hunk.resolved = true;
+            }
+            if let Some(next) = proposal.hunks.iter().position(|hunk| !hunk.resolved) {
+                proposal.active_hunk = next;
+            }
+            proposal.hunks.iter().all(|hunk| hunk.resolved)
+        } else {
+            false
+        };
+        if complete {
+            self.accept_proposal();
+        } else if let Some(proposal) = &self.proposal {
+            let remaining = proposal.hunks.iter().filter(|hunk| !hunk.resolved).count();
+            self.notify(
+                Level::Info,
+                format!("Change resolved · {remaining} remaining"),
+            );
+        }
+    }
+
+    fn keep_all_changes(&mut self) {
+        if let Some(proposal) = &mut self.proposal {
+            for hunk in &mut proposal.hunks {
+                hunk.included = true;
+                hunk.resolved = true;
+            }
+        }
+        self.accept_proposal();
+    }
+
+    fn reject_proposal(&mut self) {
+        self.proposal = None;
+        self.follow_editor = true;
+        self.notify(
+            Level::Info,
+            "All agent changes rejected; document unchanged",
+        );
+    }
+
+    fn discard_proposal_for_manual_edit(&mut self) {
+        if self.proposal.take().is_some() {
+            self.notify(
+                Level::Warning,
+                "Agent change review closed because the document was edited; your edit was preserved",
+            );
+        }
+    }
+
     fn save(&mut self, path: Option<&Path>) {
         match self.document.save(path) {
             Ok(()) => self.notify(Level::Success, "Saved"),
@@ -1551,11 +1641,7 @@ impl App {
             self.connect_mouse(event);
             return;
         }
-        if self.pending.is_some()
-            || self.proposal.is_some()
-            || self.live.permission.is_some()
-            || self.model_picker.is_some()
-        {
+        if self.pending.is_some() || self.live.permission.is_some() || self.model_picker.is_some() {
             return;
         }
         let x = event.column;
@@ -1728,6 +1814,7 @@ impl Proposal {
                     replacement: replacement[new_range].into(),
                     range: old_range,
                     included: true,
+                    resolved: false,
                 })
             })
             .collect();
@@ -1886,6 +1973,38 @@ mod tests {
         );
         a.document.undo();
         assert_eq!(a.document.text, original);
+    }
+    #[test]
+    fn dedicated_change_keys_resolve_without_modal_review() {
+        let mut a = app();
+        a.document.insert("hello");
+        a.proposal = Some(Proposal::new(
+            false,
+            a.document.revision,
+            0..5,
+            "hello".into(),
+            "HELLO".into(),
+        ));
+        a.key(KeyEvent::new(KeyCode::Enter, KeyModifiers::CONTROL));
+        assert_eq!(a.document.text, "HELLO");
+        assert!(a.proposal.is_none());
+        a.document.undo();
+        assert_eq!(a.document.text, "hello");
+    }
+    #[test]
+    fn manual_edit_preserves_user_work_and_closes_review() {
+        let mut a = app();
+        a.document.insert("hello");
+        a.proposal = Some(Proposal::new(
+            false,
+            a.document.revision,
+            0..5,
+            "hello".into(),
+            "HELLO".into(),
+        ));
+        a.key(KeyEvent::new(KeyCode::Char('!'), KeyModifiers::NONE));
+        assert_eq!(a.document.text, "hello!");
+        assert!(a.proposal.is_none());
     }
     #[test]
     fn proposals_support_empty_documents_and_complete_deletion() {

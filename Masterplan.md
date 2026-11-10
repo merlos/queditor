@@ -82,8 +82,8 @@ have now been added. Argument completion and broader chat-interaction parity rem
 
 Deterministic proposals, colored diff blocks, per-block inclusion, whole-proposal
 accept/reject, atomic undo, stale revision rejection, and save exclusion are
-implemented. Pending proposals are modal. Live generation allows concurrent editing
-and rejects stale results.
+implemented through a non-modal editor overlay. Live generation and review allow
+ordinary editing; manual edits take precedence and stale proposals are discarded.
 
 ### 6. Live AI and permissions — core implementation delivered
 

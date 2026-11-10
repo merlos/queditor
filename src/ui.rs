@@ -9,7 +9,7 @@ use ratatui::{
     text::{Line, Span},
     widgets::{Block, Borders, Clear, Paragraph},
 };
-use similar::{ChangeTag, TextDiff};
+use std::ops::Range;
 use unicode_segmentation::UnicodeSegmentation;
 
 pub fn draw(frame: &mut Frame, app: &mut App) {
@@ -74,11 +74,7 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
     );
     app.editor_area = editor_block.inner(panels[0]);
     frame.render_widget(editor_block, panels[0]);
-    if app.proposal.is_some() {
-        review(frame, app);
-    } else {
-        editor(frame, app);
-    }
+    editor(frame, app);
     if app.explorer.is_some() {
         explorer(frame, app);
     } else {
@@ -106,12 +102,25 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
         Level::Warning => ("WARN", theme.yellow),
         Level::Error => ("ERROR", theme.red),
     };
+    let detail = if let Some(proposal) = &app.proposal {
+        format!(
+            " REVIEW: Agent change {} of {} · Alt+[ / Alt+] navigate · Ctrl+Enter keep · Ctrl+Backspace reject",
+            proposal.active_hunk + 1,
+            proposal.hunks.len()
+        )
+    } else {
+        format!(" {}: {}", level.0, safe(&app.status))
+    };
     frame.render_widget(
         Paragraph::new(vec![
             Line::from(status),
             Line::styled(
-                format!(" {}: {}", level.0, safe(&app.status)),
-                Style::default().fg(level.1),
+                detail,
+                Style::default().fg(if app.proposal.is_some() {
+                    theme.yellow
+                } else {
+                    level.1
+                }),
             ),
         ]),
         rows[1],
@@ -143,8 +152,14 @@ fn editor(frame: &mut Frame, app: &mut App) {
     if area.width == 0 || area.height == 0 {
         return;
     }
-    let row = app.document.line_column().0;
-    let column = app.document.display_column();
+    let preview = proposal_preview(app);
+    let source = preview
+        .as_ref()
+        .map_or(app.document.text.as_str(), |preview| preview.text.as_str());
+    let (row, column) = preview.as_ref().map_or_else(
+        || (app.document.line_column().0, app.document.display_column()),
+        |preview| line_display_position(source, preview.active_offset),
+    );
     let width = usize::from(area.width).max(1);
     let height = usize::from(area.height);
     let selection = app.document.selection();
@@ -153,7 +168,7 @@ fn editor(frame: &mut Frame, app: &mut App) {
     let mut frontmatter = false;
     let mut fence = false;
     let mut offset = 0;
-    for (index, raw) in app.document.text.split('\n').enumerate() {
+    for (index, raw) in source.split('\n').enumerate() {
         let text = raw.trim_end_matches('\r');
         if text == "---" && (index == 0 || frontmatter) {
             frontmatter = !frontmatter;
@@ -209,7 +224,15 @@ fn editor(frame: &mut Frame, app: &mut App) {
                     style = style.fg(app.theme.yellow).add_modifier(Modifier::ITALIC);
                 }
             }
-            if selection
+            let pending_change = preview.as_ref().is_some_and(|preview| {
+                preview
+                    .changed
+                    .iter()
+                    .any(|range| range.contains(&(offset + byte)))
+            });
+            if pending_change {
+                style = style.fg(app.theme.green).add_modifier(Modifier::BOLD);
+            } else if selection
                 .as_ref()
                 .is_some_and(|range| range.contains(&(offset + byte)))
             {
@@ -258,6 +281,7 @@ fn editor(frame: &mut Frame, app: &mut App) {
         .saturating_sub(cursor_start)
         .min(width.saturating_sub(1));
     if app.focus == Focus::Editor
+        && app.proposal.is_none()
         && app.pending.is_none()
         && app.live.permission.is_none()
         && cursor_visual >= app.editor_scroll
@@ -270,80 +294,48 @@ fn editor(frame: &mut Frame, app: &mut App) {
     }
 }
 
-fn review(frame: &mut Frame, app: &mut App) {
-    let Some(p) = &app.proposal else {
-        return;
-    };
-    let mut lines = vec![Line::styled(
-        if p.mock {
-            "MOCK PROPOSAL · ↑/↓ blocks · Space toggles · Enter applies · A all · R reject"
-        } else if app.review_armed {
-            "AGENT PROPOSAL · ↑/↓ blocks · Space toggles · Enter applies · A all · R reject"
-        } else {
-            "AGENT PROPOSAL · Ctrl+R to review · Esc rejects"
-        },
-        Style::default().fg(app.theme.yellow),
-    )];
-    let mut active_line = 1;
-    for (index, hunk) in p.hunks.iter().enumerate() {
-        let active = index == p.active_hunk;
-        if active {
-            active_line = lines.len();
+struct ProposalPreview {
+    text: String,
+    changed: Vec<Range<usize>>,
+    active_offset: usize,
+}
+
+fn proposal_preview(app: &App) -> Option<ProposalPreview> {
+    let proposal = app.proposal.as_ref()?;
+    let mut text = app.document.text[..proposal.range.start].to_owned();
+    let mut changed = vec![];
+    let mut source_offset = 0;
+    let mut active_offset = text.len();
+    for (index, hunk) in proposal.hunks.iter().enumerate() {
+        text.push_str(&proposal.original[source_offset..hunk.range.start]);
+        if index == proposal.active_hunk {
+            active_offset = text.len();
         }
-        lines.push(Line::styled(
-            format!(
-                "{} [{}] Block {} of {}",
-                if active { ">" } else { " " },
-                if hunk.included { "x" } else { " " },
-                index + 1,
-                p.hunks.len()
-            ),
-            Style::default()
-                .fg(if active {
-                    app.theme.accent
-                } else {
-                    app.theme.yellow
-                })
-                .add_modifier(if active {
-                    Modifier::BOLD
-                } else {
-                    Modifier::empty()
-                }),
-        ));
-        let diff = TextDiff::from_lines(&hunk.original, &hunk.replacement);
-        for change in diff.iter_all_changes() {
-            let (prefix, color) = match change.tag() {
-                ChangeTag::Delete => ("-", app.theme.red),
-                ChangeTag::Insert => ("+", app.theme.green),
-                ChangeTag::Equal => (" ", app.theme.muted),
-            };
-            for line in wrapped(
-                &format!(
-                    "{prefix}{}",
-                    change.to_string().trim_end_matches(['\r', '\n'])
-                ),
-                usize::from(app.editor_area.width),
-            ) {
-                lines.push(Line::styled(line, Style::default().fg(color)));
+        if hunk.included {
+            let start = text.len();
+            text.push_str(&hunk.replacement);
+            if start < text.len() {
+                changed.push(start..text.len());
             }
+        } else {
+            text.push_str(&hunk.original);
         }
+        source_offset = hunk.range.end;
     }
-    let height = usize::from(app.editor_area.height).max(1);
-    if active_line < app.editor_scroll {
-        app.editor_scroll = active_line;
-    } else if active_line >= app.editor_scroll + height {
-        app.editor_scroll = active_line + 1 - height;
-    }
-    app.editor_scroll = app.editor_scroll.min(lines.len().saturating_sub(height));
-    frame.render_widget(
-        Paragraph::new(
-            lines
-                .into_iter()
-                .skip(app.editor_scroll)
-                .collect::<Vec<_>>(),
-        ),
-        app.editor_area,
-    );
+    text.push_str(&proposal.original[source_offset..]);
+    text.push_str(&app.document.text[proposal.range.end..]);
+    Some(ProposalPreview {
+        text,
+        changed,
+        active_offset,
+    })
+}
+
+fn line_display_position(text: &str, offset: usize) -> (usize, usize) {
+    let before = &text[..offset.min(text.len())];
+    let row = before.bytes().filter(|byte| *byte == b'\n').count();
+    let column = display_width(before.rsplit('\n').next().unwrap_or(""));
+    (row, column)
 }
 
 fn chat(frame: &mut Frame, app: &mut App) {
@@ -945,9 +937,19 @@ mod tests {
     fn renders_review_and_confirmation() {
         let mut app = App::new(None).unwrap();
         app.document.insert("hello\nworld");
-        app.command("/demo").unwrap();
+        app.command("/rewrite \"HELLO\\nworld\"").unwrap();
         let mut terminal = Terminal::new(TestBackend::new(140, 40)).unwrap();
         terminal.draw(|f| draw(f, &mut app)).unwrap();
+        let screen = terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect::<String>();
+        assert!(screen.contains("HELLO"));
+        assert!(screen.contains("Ctrl+Enter keep"));
+        assert!(!screen.contains("-hello"));
         app.command("/quit").unwrap();
         terminal.draw(|f| draw(f, &mut app)).unwrap();
     }

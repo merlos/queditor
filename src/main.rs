@@ -3,7 +3,8 @@ use clap::Parser;
 use crossterm::{
     event::{
         self, DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture,
-        Event, KeyEventKind,
+        Event, KeyEventKind, KeyboardEnhancementFlags, PopKeyboardEnhancementFlags,
+        PushKeyboardEnhancementFlags,
     },
     execute,
     terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
@@ -38,6 +39,7 @@ impl Drop for TerminalGuard {
             io::stdout(),
             DisableBracketedPaste,
             DisableMouseCapture,
+            PopKeyboardEnhancementFlags,
             LeaveAlternateScreen,
             crossterm::cursor::Show
         );
@@ -90,7 +92,8 @@ fn main() -> Result<()> {
         io::stdout(),
         EnterAlternateScreen,
         EnableMouseCapture,
-        EnableBracketedPaste
+        EnableBracketedPaste,
+        PushKeyboardEnhancementFlags(KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES)
     )?;
     let mut terminal = Terminal::new(CrosstermBackend::new(io::stdout()))?;
     // Restore before the panic hook prints diagnostics; Drop restores again harmlessly.
@@ -101,6 +104,7 @@ fn main() -> Result<()> {
             io::stdout(),
             DisableBracketedPaste,
             DisableMouseCapture,
+            PopKeyboardEnhancementFlags,
             LeaveAlternateScreen,
             crossterm::cursor::Show
         );

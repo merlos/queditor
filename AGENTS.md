@@ -43,7 +43,8 @@ they acquire real complexity; do not create empty placeholder hierarchies.
 - Chat mode is read-only. Agent mode may target the complete open document snapshot;
   current selections and pinned snapshots are important context, not edit boundaries.
 - Cancellation must discard generated proposals and prevent late events mutating a new session/document.
-- Live proposal acceptance requires an explicit review action before ordinary A/Enter keys.
+- Live proposal acceptance uses dedicated modified shortcuts; ordinary typing and
+  Enter must never accept an unseen change.
 - Compaction must reject tool calls, even if a provider returns them without declared tools.
 - Session-content persistence is opt-in; never persist temporary grants or credentials.
 - Recovery writes local state, not the original document; restoration is explicit.

@@ -84,10 +84,18 @@ Optional persistence and recovery are described in [live AI](live-ai.md).
 whole document, in that priority order. `/rewrite "replacement"` proposes the
 supplied text. These are deterministic local demonstrations, not model output.
 
-The editor displays a diff with `-` deletions/red and `+` additions/green. During
-review, ordinary editing is paused. A or Enter accepts; R or Escape rejects.
-Use arrows/PageUp/PageDown to scroll the diff. Acceptance is not a save and can be
-undone. Saving while a proposal exists saves only the unchanged accepted document.
+The editor remains usable while agent changes are pending. It previews the proposed
+document directly in the editor, with proposed replacement text highlighted. The
+bottom review line keeps the acceptance controls visible. Alt+] and Alt+[ move
+between changes, Ctrl+Enter keeps the active change, and Ctrl+Backspace rejects it.
+These modified keys require terminal enhanced-keyboard support; `/changes keep` and
+`/changes reject` are portable alternatives. `/changes keep-all` and `/changes
+reject-all` resolve the complete proposal. Ordinary typing, Enter, and Escape never
+accept changes. Acceptance is not a save and can be undone.
+
+If you edit the document while changes are pending, Queditor preserves your edit and
+closes the now-stale review layer rather than overwriting your work. Saving while a
+proposal exists saves only the unchanged accepted document.
 
 On quitting/opening during review, saving-and-continuing saves accepted text and
 discards the proposal. Cancel the confirmation to return to review.
@@ -100,11 +108,11 @@ open document and may propose a complete revised document based on the prompt. A
 selection is highlighted as important context but does not restrict the editable
 range. The result is never applied or saved automatically.
 
-Live results require Ctrl+R to open review, preventing queued typing from accepting
-unseen edits. Up/Down selects a changed block, Space includes/excludes that block,
-Enter applies all included blocks, A accepts all blocks immediately, and R/Escape
-rejects the proposal. Included blocks are validated and applied together as one
-undoable edit. You may edit during generation; stale results are rejected.
+Live results enter the same non-modal change review automatically. Dedicated modified
+shortcuts prevent queued ordinary typing from accepting unseen edits. Changes kept
+individually are validated and applied together as one undoable edit when review is
+complete. You may edit during generation or review; stale results are rejected and
+manual edits take precedence.
 
 Escape cancels active agent work from either pane, including thinking, streaming,
 tool work, provider waits, and permission waits. The chat title animates and reports

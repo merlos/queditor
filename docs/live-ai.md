@@ -98,11 +98,14 @@ never directly applies or saves changes. Queditor checks original text/revision
 again after successful turn completion. Stale revisions, failure, truncation, or
 cancellation never stage/apply generated edits.
 
-For live results, Ctrl+R opens review before acceptance keys are active, so queued
-typing cannot accept an unseen proposal. Up/Down navigates diff blocks, Space
-includes/excludes one, Enter applies included blocks, A applies all, and R/Escape
-rejects all. Partial choices are composed against the original snapshot and applied
-as one validated, undoable edit. Saving remains separate.
+Live results appear as a non-modal review layer over the normal editor. Alt+] and
+Alt+[ navigate changes, Ctrl+Enter keeps one, and Ctrl+Backspace rejects one;
+`/changes keep` and `/changes reject` are alternatives for terminals without
+enhanced-keyboard support. `/changes keep-all` and `/changes reject-all` resolve everything. Ordinary typing,
+Enter, and Escape never accept a change. Partial choices are composed against the
+original snapshot and applied as one validated, undoable edit when review completes.
+Manual document editing closes a stale review layer while preserving the user's edit.
+Saving remains separate.
 
 Escape from either pane always stops active generation, streaming, tool execution,
 provider waits, or permission waits and drops pending tool/proposal events. `/cancel`

@@ -291,8 +291,7 @@ impl App {
                                     else {
                                         self.proposal = Some(Proposal::new(false, a.revision, a.range, a.text, replacement));
                                         self.editor_scroll = 0;
-                                        self.review_armed = false;
-                                        self.notify(Level::Info, "Agent proposal ready · Ctrl+R opens block review · R/Esc rejects · not saved");
+                                        self.notify(Level::Info, "Agent changes ready · keep editing · Alt+[ / Alt+] navigate · Ctrl+Enter keeps · Ctrl+Backspace rejects");
                                     }
                                 },
                                 _ => self.notify(Level::Warning, "Agent proposal is stale; document unchanged. Retry against the current document."),
@@ -762,14 +761,20 @@ mod tests {
             crossterm::event::KeyCode::Char('a'),
             crossterm::event::KeyModifiers::NONE,
         ));
-        assert_eq!(app.document.text, "hello"); // Ordinary queued typing cannot accept live output.
-        app.key(crossterm::event::KeyEvent::new(
-            crossterm::event::KeyCode::Char('r'),
-            crossterm::event::KeyModifiers::CONTROL,
+        assert_eq!(app.document.text, "helloa"); // Ordinary typing edits; it never accepts output.
+        assert!(app.proposal.is_none());
+        app.document.undo();
+        assert_eq!(app.document.text, "hello");
+        app.proposal = Some(crate::app::Proposal::new(
+            false,
+            app.document.revision,
+            0..5,
+            "hello".into(),
+            "HELLO".into(),
         ));
         app.key(crossterm::event::KeyEvent::new(
-            crossterm::event::KeyCode::Char('a'),
-            crossterm::event::KeyModifiers::NONE,
+            crossterm::event::KeyCode::Enter,
+            crossterm::event::KeyModifiers::CONTROL,
         ));
         assert_eq!(app.document.text, "HELLO");
         app.document.undo();
