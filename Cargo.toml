@@ -1,0 +1,25 @@
+[package]
+name = "queditor"
+version = "0.1.0"
+edition = "2024"
+description = "A terminal text editor with reviewable assistant edits"
+license = "MIT"
+
+[dependencies]
+anyhow = "1"
+clap = { version = "4", features = ["derive"] }
+crossterm = "0.28"
+genai = "0.7"
+futures = "0.3"
+tokio = { version = "1", features = ["rt-multi-thread", "sync", "time", "macros"] }
+serde_json = "1"
+uuid = { version = "1", features = ["v4"] }
+cap-std = "3"
+ratatui = "0.29"
+serde = { version = "1", features = ["derive"] }
+serde_yaml_ng = "0.10"
+similar = "2"
+shlex = "1"
+tempfile = "3"
+unicode-segmentation = "1"
+unicode-width = "0.2"
