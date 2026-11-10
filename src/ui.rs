@@ -29,6 +29,8 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
         );
         if app.pending.is_some() {
             confirmation(frame, app);
+        } else if app.live.permission.is_some() {
+            permission(frame, app);
         }
         return;
     }
@@ -80,7 +82,7 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
     }
     let (row, col) = app.document.line_column();
     let status = format!(
-        " {} · {}:{} · {} · {}/mock · {}",
+        " {} · {}:{} · {} · {} / {}{} · {}",
         safe(&name),
         row + 1,
         col + 1,
@@ -90,6 +92,8 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
             "CHAT"
         },
         safe(&app.agents[app.agent].name),
+        safe(&app.config.model),
+        if app.busy() { " [running]" } else { "" },
         app.config.theme
     );
     let level = match app.level {
@@ -110,6 +114,8 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
     );
     if app.pending.is_some() {
         confirmation(frame, app);
+    } else if app.live.permission.is_some() {
+        permission(frame, app);
     }
 }
 
@@ -234,6 +240,7 @@ fn editor(frame: &mut Frame, app: &mut App) {
     frame.render_widget(Paragraph::new(lines), area);
     if app.focus == Focus::Editor
         && app.pending.is_none()
+        && app.live.permission.is_none()
         && row >= app.editor_scroll
         && row < app.editor_scroll + height
         && column >= app.editor_horizontal
@@ -251,7 +258,13 @@ fn review(frame: &mut Frame, app: &mut App) {
         return;
     };
     let mut lines = vec![Line::styled(
-        "MOCK PROPOSAL · A accept · R reject",
+        if p.mock {
+            "MOCK PROPOSAL · A accept · R reject"
+        } else if app.review_armed {
+            "AGENT PROPOSAL · A accept · R reject"
+        } else {
+            "AGENT PROPOSAL · Ctrl+R to review · Esc rejects"
+        },
         Style::default().fg(app.theme.yellow),
     )];
     let diff = TextDiff::from_lines(&p.original, &p.replacement);
@@ -289,7 +302,11 @@ fn review(frame: &mut Frame, app: &mut App) {
 
 fn chat(frame: &mut Frame, app: &mut App) {
     let block = pane(
-        &format!(" Chat · {} · MOCK ", safe(&app.agents[app.agent].name)),
+        &format!(
+            " Chat · {} · {} ",
+            safe(&app.agents[app.agent].name),
+            app.backend_label()
+        ),
         app.focus == Focus::Chat,
         app,
     );
@@ -370,6 +387,7 @@ fn chat(frame: &mut Frame, app: &mut App) {
     if app.focus == Focus::Chat
         && app.proposal.is_none()
         && app.pending.is_none()
+        && app.live.permission.is_none()
         && input_area.width > 0
         && input_area.height > 0
     {
@@ -462,10 +480,48 @@ fn confirmation(frame: &mut Frame, app: &App) {
         h,
     );
     frame.render_widget(Clear, popup);
-    frame.render_widget(Paragraph::new("Unsaved content or a pending proposal.\nS: save accepted content and continue\nD: discard and continue · Esc: cancel")
+    frame.render_widget(Paragraph::new("Unsaved content, pending proposal, or running agent.\nS: save accepted content and continue (agent cancelled)\nD: discard and continue · Esc: cancel")
         .wrap(ratatui::widgets::Wrap { trim: false })
         .block(Block::default().borders(Borders::ALL).title(" Confirm "))
         .style(Style::default().bg(app.theme.bg).fg(app.theme.yellow)), popup);
+}
+
+fn permission(frame: &mut Frame, app: &App) {
+    let Some(prompt) = &app.live.permission else {
+        return;
+    };
+    let area = frame.area();
+    let w = area.width.min(90);
+    let h = area.height.min(10);
+    let popup = Rect::new(
+        area.x + (area.width - w) / 2,
+        area.y + (area.height - h) / 2,
+        w,
+        h,
+    );
+    frame.render_widget(Clear, popup);
+    let text = format!(
+        "Operation: {}\nPath: {}\n{}\nApproving sends the returned text/listing to {}.\nO: once · S: session · A: always for this exact path/operation\nN/Esc: deny · Ctrl+C: cancel agent · Ctrl+Q: exit",
+        prompt.target.operation,
+        safe(&prompt.target.path.display().to_string()),
+        if prompt.target.outside_workspace() {
+            "WARNING: outside current workspace"
+        } else {
+            "Inside current workspace (still requires approval)"
+        },
+        safe(&app.config.model)
+    );
+    frame.render_widget(
+        Paragraph::new(text)
+            .wrap(ratatui::widgets::Wrap { trim: false })
+            .block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .title(" Agent file permission "),
+            )
+            .style(Style::default().bg(app.theme.bg).fg(app.theme.yellow)),
+        popup,
+    );
 }
 
 fn safe(text: &str) -> String {

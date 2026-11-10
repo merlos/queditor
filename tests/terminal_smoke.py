@@ -11,17 +11,24 @@ import tempfile
 import termios
 import time
 import unittest
+import json
+import threading
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+import codecs
+import re
+import unicodedata
 
 ROOT = Path(__file__).resolve().parents[1]
 BINARY = ROOT / "target" / "debug" / "queditor"
 
 
 class TerminalApp:
-    def __init__(self, document, config, width=140, height=40):
+    def __init__(self, document, config, width=140, height=40, extra_env=None, backend=b"MOCK"):
         self.master, self.slave = pty.openpty()
         fcntl.ioctl(self.slave, termios.TIOCSWINSZ, struct.pack("HHHH", height, width, 0, 0))
         self.original_attrs = termios.tcgetattr(self.slave)
-        env = dict(os.environ, TERM="xterm-256color", XDG_CONFIG_HOME=str(config))
+        env = dict(os.environ, TERM="xterm-256color", XDG_CONFIG_HOME=str(config), XDG_STATE_HOME=str(config.parent / "state"))
+        env.update(extra_env or {})
 
         def attach_terminal():
             os.setsid()
@@ -32,7 +39,52 @@ class TerminalApp:
             stderr=self.slave, env=env, cwd=ROOT, preexec_fn=attach_terminal,
         )
         self.output = bytearray()
-        self.wait_for(b"MOCK")
+        self.screen = [[" " for _ in range(width)] for _ in range(height)]
+        self.screen_row = self.screen_col = 0
+        self.screen_pending = ""
+        self.decoder = codecs.getincrementaldecoder("utf-8")("replace")
+        self.wait_for(backend)
+
+    def feed(self, data):
+        """Minimal VT cursor/screen tracking: Ratatui emits diffs, not full text lines."""
+        self.output.extend(data)
+        self.screen_pending += self.decoder.decode(data)
+        text = self.screen_pending
+        index = 0
+        while index < len(text):
+            char = text[index]
+            if char == "\x1b":
+                if index + 1 >= len(text):
+                    break
+                if text[index + 1] == "[":
+                    match = re.match(r"\x1b\[([0-9;?]*)([A-Za-z~])", text[index:])
+                    if not match:
+                        break
+                    parameters, command = match.groups()
+                    values = [int(p or "0") for p in parameters.lstrip("?").split(";")]
+                    if command in "Hf":
+                        self.screen_row = max(0, (values[0] or 1) - 1)
+                        self.screen_col = max(0, ((values[1] if len(values) > 1 else 1) or 1) - 1)
+                    elif command == "J" and values[0] in (2, 3):
+                        self.screen = [[" " for _ in row] for row in self.screen]
+                    index += match.end()
+                    continue
+                index += 2
+                continue
+            index += 1
+            if char == "\r":
+                self.screen_col = 0
+            elif char == "\n":
+                self.screen_row += 1
+            elif not char.isprintable():
+                continue
+            elif unicodedata.combining(char):
+                continue
+            else:
+                if 0 <= self.screen_row < len(self.screen) and 0 <= self.screen_col < len(self.screen[0]):
+                    self.screen[self.screen_row][self.screen_col] = char
+                self.screen_col += 2 if unicodedata.east_asian_width(char) in ("W", "F") else 1
+        self.screen_pending = text[index:]
 
     def wait_for(self, needle, timeout=5):
         deadline = time.monotonic() + timeout
@@ -40,9 +92,12 @@ class TerminalApp:
         while time.monotonic() < deadline:
             if needle in self.output[start:]:
                 return
+            visible = " ".join(" ".join("".join(row) for row in self.screen).split())
+            if len(self.output) > start and needle.decode() in visible:
+                return
             ready, _, _ = select.select([self.master], [], [], 0.1)
             if ready:
-                self.output.extend(os.read(self.master, 65536))
+                self.feed(os.read(self.master, 65536))
             if self.process.poll() is not None:
                 break
         raise AssertionError(f"Terminal did not render {needle!r}: {bytes(self.output[-2000:])!r}")
@@ -104,6 +159,201 @@ class SmokeTests(unittest.TestCase):
             app.send(b"d")
             app.finish()
             self.assertEqual(doc.read_text(), "")
+
+
+class FakeProvider:
+    """Exercises genai's real HTTP/SSE adapter against a local, credential-free server."""
+
+    def __init__(self, read_path, deny=False):
+        self.requests = []
+        self.read_path = str(read_path)
+        self.deny = deny
+        owner = self
+
+        class Handler(BaseHTTPRequestHandler):
+            def log_message(self, *_):
+                pass
+
+            def do_POST(self):
+                body = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
+                owner.requests.append(body)
+                turn = len(owner.requests)
+                self.send_response(200)
+                self.send_header("Content-Type", "text/event-stream")
+                self.send_header("Connection", "close")
+                self.end_headers()
+
+                def chunk(delta, finish=None):
+                    data = {"id": "local-test", "object": "chat.completion.chunk", "model": "test", "choices": [{"index": 0, "delta": delta, "finish_reason": finish}]}
+                    self.wfile.write(("data: " + json.dumps(data) + "\n\n").encode())
+                    self.wfile.flush()
+
+                if turn == 1 or (turn == 2 and not owner.deny):
+                    name = "read_file" if turn == 1 else "propose_edit"
+                    arguments = {"path": owner.read_path} if turn == 1 else {"replacement": "HELLO"}
+                    chunk({"role": "assistant", "tool_calls": [{"index": 0, "id": f"call-{turn}", "type": "function", "function": {"name": name, "arguments": json.dumps(arguments)}}]})
+                    chunk({}, "tool_calls")
+                else:
+                    chunk({"role": "assistant", "content": "Review " if not owner.deny else "Access "})
+                    chunk({"content": "ready" if not owner.deny else "denied"})
+                    chunk({}, "stop")
+                self.wfile.write(b"data: [DONE]\n\n")
+                self.wfile.flush()
+
+        self.server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
+        self.thread.start()
+        self.endpoint = f"http://127.0.0.1:{self.server.server_port}/v1/"
+
+    def close(self):
+        self.server.shutdown()
+        self.server.server_close()
+        self.thread.join()
+
+
+class LiveSmokeTests(unittest.TestCase):
+    def test_compaction_rejects_undeclared_tool_calls(self):
+        with tempfile.TemporaryDirectory(prefix="queditor-compact-") as directory:
+            root = Path(directory)
+            doc = root / "draft.md"
+            doc.write_text("")
+            note = root / "note.md"
+            note.write_text("COMPACTION_MUST_NOT_READ")
+            config = root / "config"
+            (config / "queditor").mkdir(parents=True)
+            (config / "queditor/config.yaml").write_text("model: genai_1::test\n")
+            provider = FakeProvider(note)
+            self.addCleanup(provider.close)
+            app = TerminalApp(doc, config, extra_env={"GENAI_1_ENDPOINT": provider.endpoint, "GENAI_1_API_KEY": "local-test-placeholder"}, backend=b"GENAI")
+            self.addCleanup(app.close)
+            app.send(b"\t/compact\r", b"[Incomplete")
+            self.assertEqual(len(provider.requests), 1)
+            self.assertFalse(provider.requests[0].get("tools"))
+            self.assertNotIn(b"Agent file permission", app.output)
+            self.assertNotIn("COMPACTION_MUST_NOT_READ", json.dumps(provider.requests))
+            app.send(b"\x11")
+            app.finish()
+
+    def test_opt_in_session_resume_does_not_change_document(self):
+        with tempfile.TemporaryDirectory(prefix="queditor-session-") as directory:
+            root = Path(directory)
+            doc = root / "draft.md"
+            doc.write_text("original document")
+            config = root / "config"
+            (config / "queditor").mkdir(parents=True)
+            (config / "queditor/config.yaml").write_text("persist_sessions: true\n")
+            first = TerminalApp(doc, config)
+            self.addCleanup(first.close)
+            first.send(b"\tremember this conversation\r", b"Mock mode is selected")
+            first.send(b"\x11")
+            first.finish()
+            records = list((root / "state/queditor").glob("session-*.json"))
+            self.assertEqual(len(records), 1)
+            identifier = records[0].stem.removeprefix("session-")
+            resumed = TerminalApp(doc, config)
+            self.addCleanup(resumed.close)
+            resumed.send(f"\t/resume {identifier}\r".encode(), b"Session resumed")
+            self.assertEqual(doc.read_text(), "original document")
+            resumed.send(b"\x11")
+            resumed.finish()
+            self.assertEqual(len(list((root / "state/queditor").glob("session-*.json"))), 2)
+
+    def test_signal_shutdown_restores_terminal_and_preserves_recovery(self):
+        with tempfile.TemporaryDirectory(prefix="queditor-signal-") as directory:
+            root = Path(directory)
+            doc = root / "draft.md"
+            doc.write_text("")
+            app = TerminalApp(doc, root / "config")
+            self.addCleanup(app.close)
+            app.send(b"signal-safe text\t/keys\r", b"Profile:")
+            app.process.terminate()
+            app.finish()
+            self.assertEqual(doc.read_text(), "")
+            records = list((root / "state/queditor").glob("recovery-*.json"))
+            self.assertEqual(len(records), 1)
+            self.assertEqual(json.loads(records[0].read_text())["document"]["text"], "signal-safe text")
+
+    def test_permission_tool_loop_and_review_never_send_unattached_text(self):
+        with tempfile.TemporaryDirectory(prefix="queditor-live-") as directory:
+            root = Path(directory)
+            doc = root / "draft.md"
+            doc.write_text("helloUNATTACHED_SECRET")
+            note = root / "note.md"
+            note.write_text("approved tool context")
+            config = root / "config"
+            (config / "queditor").mkdir(parents=True)
+            (config / "queditor/config.yaml").write_text("model: genai_1::test\n")
+            provider = FakeProvider(note)
+            self.addCleanup(provider.close)
+            app = TerminalApp(doc, config, extra_env={"GENAI_1_ENDPOINT": provider.endpoint, "GENAI_1_API_KEY": "local-test-placeholder"}, backend=b"GENAI")
+            self.addCleanup(app.close)
+            app.send(b"\x1b[1;2C" * 5 + b"\t/attach\r", b"Context snapshot attached")
+            app.send(b"revise\r", b"Agent file permission")
+            self.assertEqual(len(provider.requests), 1)
+            self.assertNotIn("approved tool context", json.dumps(provider.requests))
+            app.send(b"o", b"AGENT PROPOSAL")
+            self.assertEqual(doc.read_text(), "helloUNATTACHED_SECRET")
+            self.assertNotIn("UNATTACHED_SECRET", json.dumps(provider.requests))
+            self.assertIn("approved tool context", json.dumps(provider.requests))
+            app.send(b"\x12", b"Review enabled")
+            app.send(b"a", b"Proposal accepted")
+            app.send(b"\x13", b"Saved")
+            app.send(b"\x11")
+            app.finish()
+            self.assertEqual(doc.read_text(), "HELLOUNATTACHED_SECRET")
+
+    def test_denied_read_never_reaches_provider(self):
+        with tempfile.TemporaryDirectory(prefix="queditor-live-") as directory:
+            root = Path(directory)
+            doc = root / "draft.md"
+            doc.write_text("")
+            note = root / "note.md"
+            note.write_text("DENIED_SECRET")
+            config = root / "config"
+            (config / "queditor").mkdir(parents=True)
+            (config / "queditor/config.yaml").write_text("model: genai_1::test\n")
+            provider = FakeProvider(note, deny=True)
+            self.addCleanup(provider.close)
+            app = TerminalApp(doc, config, extra_env={"GENAI_1_ENDPOINT": provider.endpoint, "GENAI_1_API_KEY": "local-test-placeholder"}, backend=b"GENAI")
+            self.addCleanup(app.close)
+            app.send(b"\tread the note\r", b"Agent file permission")
+            app.send(b"n", b"Agent finished")
+            self.assertNotIn("DENIED_SECRET", json.dumps(provider.requests))
+            self.assertIn("User denied file access", json.dumps(provider.requests))
+            app.send(b"\x11")
+            app.finish()
+
+    def test_crashed_document_can_be_recovered_without_writing_original(self):
+        with tempfile.TemporaryDirectory(prefix="queditor-recovery-") as directory:
+            root = Path(directory)
+            doc = root / "draft.md"
+            doc.write_text("")
+            config = root / "config"
+            app = TerminalApp(doc, config)
+            self.addCleanup(app.close)
+            app.send(b"unsaved")
+            deadline = time.monotonic() + 5
+            records = []
+            while time.monotonic() < deadline:
+                records = list((root / "state/queditor").glob("recovery-*.json"))
+                if records:
+                    break
+                select.select([app.master], [], [], 0.1)
+                if select.select([app.master], [], [], 0)[0]:
+                    app.output.extend(os.read(app.master, 65536))
+            self.assertTrue(records)
+            app.process.kill()
+            app.process.wait()
+            self.assertEqual(doc.read_text(), "")
+            identifier = records[0].stem.removeprefix("recovery-")
+            restored = TerminalApp(doc, config)
+            self.addCleanup(restored.close)
+            restored.send(f"\t/recover {identifier}\r".encode(), b"Recovery restored")
+            self.assertEqual(doc.read_text(), "")
+            restored.send(b"\x13", b"Saved")
+            restored.send(b"\x11")
+            restored.finish()
+            self.assertEqual(doc.read_text(), "unsaved")
 
 
 if __name__ == "__main__":

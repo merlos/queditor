@@ -34,7 +34,9 @@ Existing symlinks resolve to their targets. NUL-containing or non-UTF-8 files ar
 rejected, as are files larger than 8 MiB.
 
 External changes are checked when saving. If a file changed or disappeared, save
-to a new filename or cancel/reopen. There is no automatic recovery; save often.
+to a new filename or cancel/reopen. Private recovery checkpoints are enabled by
+default; `/recover` lists snapshots and `/recover <id>` restores into the editor
+without writing the document. Checkpoints are not a substitute for explicit saves.
 
 ## Search
 
@@ -53,10 +55,14 @@ Shift+Tab cycles agents while chat is focused.
 Select editor text, switch to chat, and run `/attach`. This pins a snapshot and
 shows its byte count. `/attach document` explicitly attaches all text; `/attach
 clear` removes it. Later edits make the snapshot stale; reattach before using it
-for a mock proposal. Nothing is sent to a provider in this build.
+for a proposal or live prompt. Mock mode sends nothing to a provider. Live mode
+sends explicitly attached text and committed history to the selected provider.
 
-`/new` clears in-memory chat/context but keeps the open document. Sessions do not
-persist. `/models` and `/compact` report the current mock-only limitation honestly.
+`/new` clears active chat/context/temporary grants but keeps the open document.
+`/models` lists configured models; `/models <provider::model>` selects one.
+`/models mock` returns to offline mode. `/compact` summarizes committed live
+history while retaining the visible transcript. `/cancel` stops an active request.
+Optional persistence and recovery are described in [live AI](live-ai.md).
 
 ## Review demonstration
 
@@ -72,11 +78,27 @@ undone. Saving while a proposal exists saves only the unchanged accepted documen
 On quitting/opening during review, saving-and-continuing saves accepted text and
 discards the proposal. Cancel the confirmation to return to review.
 
+## Live edits and file permissions
+
+Live edits require an explicit `/attach` snapshot. Ask the agent to revise it;
+`propose_edit` stages a replacement only after successful turn completion. A/R
+review and undo work as in the mock demonstration, but live results require Ctrl+R
+to enable acceptance first (preventing queued typing from accepting unseen edits).
+You may edit during generation;
+stale results are rejected.
+
+`read_file` and `list_directory` show a permission dialog with the canonical path
+and operation. O allows once, S for the session, A persistently for that exact
+path/operation/workspace, and N/Escape denies. Approval sends the result to the
+provider. Sensitive paths remain excluded. `/permissions` inspects grants;
+`/permissions clear` revokes all. `/new`, `/cd`, and `/resume` clear temporary grants.
+No agent shell execution, writes, or deletion are available.
+
 ## Troubleshooting
 
 - Use `queditor --check` to see startup settings and configuration warnings.
 - If Shift+Enter submits instead of inserting a newline, use Ctrl+J.
 - If a terminal reserves a shortcut, use commands or an alternate profile binding.
 - Terminal raw mode, mouse capture, and alternate-screen state are restored on
-  normal exit, ordinary errors, and unwinding panics; forced process termination
-  cannot guarantee cleanup.
+  normal exit, ordinary errors, unwinding panics, and handled Unix shutdown signals.
+  SIGKILL cannot guarantee cleanup; recovery only includes the latest checkpoint.

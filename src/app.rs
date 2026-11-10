@@ -12,11 +12,19 @@ use std::{
 };
 
 pub const COMMANDS: &[(&str, &str)] = &[
-    ("/new", "New mock chat session"),
-    ("/models", "Show backend/model"),
+    ("/new", "New chat session"),
+    ("/models", "List/select model: /models [provider::model]"),
     ("/quit", "Exit safely"),
     ("/exit", "Exit safely"),
-    ("/compact", "Backend availability"),
+    ("/compact", "Compact live conversation history"),
+    ("/cancel", "Cancel running agent"),
+    (
+        "/permissions",
+        "Inspect grants; /permissions clear revokes all",
+    ),
+    ("/sessions", "List saved sessions; /sessions delete <id>"),
+    ("/resume", "Resume saved session: /resume <id>"),
+    ("/recover", "List/restore recovery; /recover delete <id>"),
     ("/cd", "Change workspace: /cd <path>"),
     ("/ls", "List files: /ls [path]"),
     ("/files", "Open file explorer"),
@@ -45,8 +53,9 @@ pub enum Level {
     Warning,
     Error,
 }
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
 pub struct Message {
-    pub role: &'static str,
+    pub role: String,
     pub text: String,
 }
 #[derive(Clone)]
@@ -57,6 +66,7 @@ pub struct Attachment {
     pub label: String,
 }
 pub struct Proposal {
+    pub mock: bool,
     pub revision: u64,
     pub range: std::ops::Range<usize>,
     pub original: String,
@@ -76,6 +86,7 @@ pub struct Explorer {
 pub enum Pending {
     Quit,
     Open(PathBuf),
+    Recover(String),
 }
 #[derive(Clone)]
 pub struct Agent {
@@ -85,6 +96,7 @@ pub struct Agent {
 }
 
 pub struct App {
+    pub live: crate::live::Live,
     pub document: Document,
     pub config: Config,
     pub bindings: Bindings,
@@ -101,6 +113,7 @@ pub struct App {
     pub agent: usize,
     pub attachment: Option<Attachment>,
     pub proposal: Option<Proposal>,
+    pub review_armed: bool,
     pub explorer: Option<Explorer>,
     pub pending: Option<Pending>,
     pub status: String,
@@ -139,6 +152,7 @@ impl App {
             Document::default()
         };
         let mut app = Self {
+            live: crate::live::Live::default(),
             document,
             theme: Theme::named(&config.theme),
             config,
@@ -169,6 +183,7 @@ impl App {
             agent: 0,
             attachment: None,
             proposal: None,
+            review_armed: false,
             explorer: None,
             pending: None,
             status: "Tab switches panes · Ctrl+S saves · Ctrl+Q exits · /help in chat".into(),
@@ -183,7 +198,11 @@ impl App {
             clipboard: String::new(),
             dragging: false,
         };
-        app.message("system", "Mock backend — no network requests or AI inference. Use /demo or /rewrite to test safe edit review. /help lists commands.");
+        if app.config.model == "mock" {
+            app.message("system", "Mock backend — no network requests or AI inference. Use /demo or /rewrite to test safe edit review. /models selects a live provider.");
+        } else {
+            app.message("system", format!("Live genai model: {}. Prompts, chat history, explicit attachments and approved file reads are sent to this provider. /attach pins editor context; /cancel stops generation.", app.config.model));
+        }
         if let Err(e) = app.load_agents() {
             app.notify(
                 Level::Warning,
@@ -202,7 +221,7 @@ impl App {
     }
     pub fn message(&mut self, role: &'static str, text: impl Into<String>) {
         self.messages.push(Message {
-            role,
+            role: role.into(),
             text: text.into(),
         });
         self.follow_chat = true;
@@ -233,7 +252,34 @@ impl App {
             self.save(None);
             return;
         }
+        if ctrl
+            && key.code == KeyCode::Char('c')
+            && (self.focus == Focus::Chat || self.live.permission.is_some())
+            && self.busy()
+        {
+            self.cancel_live();
+            return;
+        }
+        if self.live.permission.is_some() {
+            self.permission_key(key);
+            return;
+        }
         if self.proposal.is_some() {
+            // Live output can arrive while the user is typing: a queued ordinary
+            // letter/Enter must not accept an unseen proposal.
+            if self.proposal.as_ref().is_some_and(|p| !p.mock) && !self.review_armed {
+                if ctrl && key.code == KeyCode::Char('r') {
+                    self.review_armed = true;
+                    self.notify(
+                        Level::Info,
+                        "Review enabled · A/Enter accepts · R/Esc rejects",
+                    );
+                    return;
+                }
+                if matches!(key.code, KeyCode::Char('a') | KeyCode::Enter) {
+                    return;
+                }
+            }
             match key.code {
                 KeyCode::Char('a') | KeyCode::Enter => self.accept_proposal(),
                 KeyCode::Char('r') | KeyCode::Esc => {
@@ -472,11 +518,23 @@ impl App {
         if input.is_empty() {
             return;
         }
+        if !input.starts_with('/') && self.busy() {
+            self.notify(
+                Level::Warning,
+                "Agent is running; cancel before submitting another prompt",
+            );
+            return;
+        }
         self.message("you", input.clone());
         if input.starts_with('/') {
             if let Err(e) = self.command(&input) {
                 self.notify(Level::Error, format!("{e:#}"));
                 return; // Keep failed input for correction.
+            }
+        } else if self.config.model != "mock" {
+            if let Err(e) = self.start_live(&input, false) {
+                self.notify(Level::Error, format!("{e:#}"));
+                return;
             }
         } else {
             let context = self
@@ -484,7 +542,7 @@ impl App {
                 .as_ref()
                 .map(|a| format!(" Attached {} ({} bytes).", a.label, a.text.len()))
                 .unwrap_or_default();
-            self.message("mock", format!("{} is selected.{context} Live AI is not connected in this build. /demo previews an uppercase edit; /rewrite <text> previews a replacement.", self.agents[self.agent].name));
+            self.message("mock", format!("{} is selected.{context} Mock mode is selected. /models <provider::model> enables live AI. /demo previews an uppercase edit; /rewrite <text> previews a replacement.", self.agents[self.agent].name));
         }
         self.composer.clear();
         self.composer_cursor = 0;
@@ -496,78 +554,225 @@ impl App {
         let arg = args.get(1).map(String::as_str);
         match args.first().map(String::as_str).unwrap_or("") {
             "/quit" | "/exit" => self.request(Pending::Quit),
-            "/save" => { let path = arg.map(|p| self.resolve(p)); self.document.save(path.as_deref())?; self.notify(Level::Success, "Saved"); },
+            "/save" => {
+                let path = arg.map(|p| self.resolve(p));
+                self.document.save(path.as_deref())?;
+                self.notify(Level::Success, "Saved");
+            }
             "/open" => {
-                if let Some(p) = arg { self.request(Pending::Open(self.resolve(p))); }
-                else { self.show_explorer(self.workspace.clone())?; }
-            },
-            "/new" => { self.messages.clear(); self.attachment = None; self.chat_scroll = 0; self.message("system", "New mock session; document remains open."); },
-            "/models" => self.message("system", "Available model: mock/local. Live provider integration is planned, not implemented."),
-            "/compact" => self.message("system", "Compaction requires a live backend and is not implemented. History was preserved."),
+                if let Some(p) = arg {
+                    self.request(Pending::Open(self.resolve(p)));
+                } else {
+                    self.show_explorer(self.workspace.clone())?;
+                }
+            }
+            "/new" => {
+                self.cancel_live();
+                self.checkpoint_state()?;
+                self.new_session();
+            }
+            "/models" => {
+                if self.busy() {
+                    bail!("Cancel the current agent before changing model");
+                }
+                if let Some(model) = arg {
+                    crate::config::validate_model(model)?;
+                    self.config.model = model.into();
+                }
+                self.message("system", format!("Current: {}\nConfigured: {}\nUse /models <provider::model> or /models mock. Live requests send committed conversation history to the selected provider; /new clears it.", self.config.model, self.config.models.join(", ")));
+            }
+            "/compact" => {
+                self.start_live("Summarize the conversation for continuation.", true)?;
+            }
+            "/cancel" => self.cancel_live(),
+            "/permissions" => self.permissions_command(&args)?,
+            "/sessions" | "/resume" | "/recover" => self.state_command(&args)?,
             "/cd" => {
-                let path = self.resolve(arg.context("Usage: /cd <path>")?).canonicalize()?;
-                if !path.is_dir() { bail!("Not a directory"); }
-                self.workspace = path; self.notify(Level::Success, format!("Workspace: {}", self.workspace.display()));
-            },
+                if self.busy() {
+                    bail!("Cancel the current agent before changing workspace");
+                }
+                let path = self
+                    .resolve(arg.context("Usage: /cd <path>")?)
+                    .canonicalize()?;
+                if !path.is_dir() {
+                    bail!("Not a directory");
+                }
+                self.workspace = path;
+                self.live.permissions.clear_session();
+                self.notify(
+                    Level::Success,
+                    format!(
+                        "Workspace: {} · temporary grants cleared",
+                        self.workspace.display()
+                    ),
+                );
+            }
             "/ls" => {
-                let path = arg.map(|p| self.resolve(p)).unwrap_or_else(|| self.workspace.clone());
+                let path = arg
+                    .map(|p| self.resolve(p))
+                    .unwrap_or_else(|| self.workspace.clone());
                 let e = Explorer::load(path)?;
-                self.message("files", e.entries.iter().map(|e| format!("{}{}", e.name, if e.directory { "/" } else { "" })).collect::<Vec<_>>().join("\n"));
-            },
-            "/files" => self.show_explorer(arg.map(|p| self.resolve(p)).unwrap_or_else(|| self.workspace.clone()))?,
+                self.message(
+                    "files",
+                    e.entries
+                        .iter()
+                        .map(|e| format!("{}{}", e.name, if e.directory { "/" } else { "" }))
+                        .collect::<Vec<_>>()
+                        .join("\n"),
+                );
+            }
+            "/files" => self.show_explorer(
+                arg.map(|p| self.resolve(p))
+                    .unwrap_or_else(|| self.workspace.clone()),
+            )?,
             "/theme" => {
                 let name = arg.context("Usage: /theme mocha|daylight")?;
-                if !matches!(name, "mocha" | "daylight") { bail!("Unknown theme"); }
-                self.config.theme = name.into(); self.theme = Theme::named(name); self.notify(Level::Success, format!("Theme: {name} (this run)"));
-            },
-            "/agents" => {
-                if let Some(name) = arg { self.agent = self.agents.iter().position(|a| a.name.eq_ignore_ascii_case(name)).context("Unknown agent")?; }
-                self.message("system", self.agents.iter().map(|a| format!("{}: {}", a.name, a.description)).collect::<Vec<_>>().join("\n"));
-            },
-            "/attach" => {
-                if arg == Some("clear") { self.attachment = None; }
-                else {
-                    let range = if arg == Some("document") { 0..self.document.text.len() }
-                        else { self.document.selection().context("Select editor text first, or use /attach document")? };
-                    self.attachment = Some(Attachment { revision: self.document.revision, text: self.document.text[range.clone()].into(),
-                        range, label: if arg == Some("document") { "document" } else { "selection" }.into() });
+                if !matches!(name, "mocha" | "daylight") {
+                    bail!("Unknown theme");
                 }
-                self.notify(Level::Success, if self.attachment.is_some() { "Context snapshot attached" } else { "Context cleared" });
-            },
+                self.config.theme = name.into();
+                self.theme = Theme::named(name);
+                self.notify(Level::Success, format!("Theme: {name} (this run)"));
+            }
+            "/agents" => {
+                if let Some(name) = arg {
+                    self.agent = self
+                        .agents
+                        .iter()
+                        .position(|a| a.name.eq_ignore_ascii_case(name))
+                        .context("Unknown agent")?;
+                }
+                self.message(
+                    "system",
+                    self.agents
+                        .iter()
+                        .map(|a| format!("{}: {}", a.name, a.description))
+                        .collect::<Vec<_>>()
+                        .join("\n"),
+                );
+            }
+            "/attach" => {
+                if arg == Some("clear") {
+                    self.attachment = None;
+                } else {
+                    let range = if arg == Some("document") {
+                        0..self.document.text.len()
+                    } else {
+                        self.document
+                            .selection()
+                            .context("Select editor text first, or use /attach document")?
+                    };
+                    self.attachment = Some(Attachment {
+                        revision: self.document.revision,
+                        text: self.document.text[range.clone()].into(),
+                        range,
+                        label: if arg == Some("document") {
+                            "document"
+                        } else {
+                            "selection"
+                        }
+                        .into(),
+                    });
+                }
+                self.notify(
+                    Level::Success,
+                    if self.attachment.is_some() {
+                        "Context snapshot attached"
+                    } else {
+                        "Context cleared"
+                    },
+                );
+            }
             "/demo" | "/rewrite" => {
-                if self.proposal.is_some() { bail!("Resolve the current proposal first"); }
+                if self.busy() {
+                    bail!("Cancel the current agent before creating a mock proposal");
+                }
+                if self.proposal.is_some() {
+                    bail!("Resolve the current proposal first");
+                }
                 let range = if let Some(a) = &self.attachment {
-                    if a.revision != self.document.revision { bail!("Attached context is stale; reattach current text"); }
+                    if a.revision != self.document.revision {
+                        bail!("Attached context is stale; reattach current text");
+                    }
                     a.range.clone()
-                } else { self.document.selection().unwrap_or(0..self.document.text.len()) };
+                } else {
+                    self.document
+                        .selection()
+                        .unwrap_or(0..self.document.text.len())
+                };
                 let original = self.document.text[range.clone()].to_owned();
-                let replacement = if args[0] == "/demo" { original.to_uppercase() }
-                    else { args.get(1..).filter(|a| !a.is_empty()).context("Usage: /rewrite <replacement text>")?.join(" ") };
-                if original == replacement { bail!("Mock proposal has no changes"); }
-                self.proposal = Some(Proposal { revision: self.document.revision, range, original, replacement });
+                let replacement = if args[0] == "/demo" {
+                    original.to_uppercase()
+                } else {
+                    args.get(1..)
+                        .filter(|a| !a.is_empty())
+                        .context("Usage: /rewrite <replacement text>")?
+                        .join(" ")
+                };
+                if original == replacement {
+                    bail!("Mock proposal has no changes");
+                }
+                self.proposal = Some(Proposal {
+                    mock: true,
+                    revision: self.document.revision,
+                    range,
+                    original,
+                    replacement,
+                });
+                self.review_armed = true;
                 self.editor_scroll = 0;
-                self.notify(Level::Info, "Mock proposal: A/Enter accepts · R/Esc rejects · save excludes pending edits");
-            },
+                self.notify(
+                    Level::Info,
+                    "Mock proposal: A/Enter accepts · R/Esc rejects · save excludes pending edits",
+                );
+            }
             "/find" => {
-                let needle = args.get(1..).filter(|a| !a.is_empty()).context("Usage: /find <text>")?.join(" ");
-                if needle.is_empty() { bail!("Search cannot be empty"); }
+                let needle = args
+                    .get(1..)
+                    .filter(|a| !a.is_empty())
+                    .context("Usage: /find <text>")?
+                    .join(" ");
+                if needle.is_empty() {
+                    bail!("Search cannot be empty");
+                }
                 let start = self.document.cursor;
-                let pos = self.document.text[start..].find(&needle).map(|i| start + i).or_else(|| self.document.text[..start].find(&needle)).context("Text not found")?;
-                self.document.move_to(pos, false); self.document.move_to(pos + needle.len(), true);
-                self.focus = Focus::Editor; self.follow_editor = true;
-            },
+                let pos = self.document.text[start..]
+                    .find(&needle)
+                    .map(|i| start + i)
+                    .or_else(|| self.document.text[..start].find(&needle))
+                    .context("Text not found")?;
+                self.document.move_to(pos, false);
+                self.document.move_to(pos + needle.len(), true);
+                self.focus = Focus::Editor;
+                self.follow_editor = true;
+            }
             "/replace" => {
-                if args.len() != 3 || args[1].is_empty() { bail!("Usage: /replace <old> <new> (quote spaces)"); }
+                if args.len() != 3 || args[1].is_empty() {
+                    bail!("Usage: /replace <old> <new> (quote spaces)");
+                }
                 let result = self.document.text.replace(&args[1], &args[2]);
-                self.document.replace(0..self.document.text.len(), &result); self.follow_editor = true;
+                self.document.replace(0..self.document.text.len(), &result);
+                self.follow_editor = true;
                 self.notify(Level::Success, "Replace-all complete; Ctrl+Z undoes it");
-            },
+            }
             "/keys" => {
-                let mut text = format!("Profile: {}\nGlobal: Tab focus; Ctrl+S save; Ctrl+Q quit\nChat: Enter submit; Ctrl+J newline; Shift+Tab agent; Tab complete\nEditor: arrows, Shift+arrows select, Home/End, PgUp/PgDown\nCopy/paste shortcuts use an internal clipboard; terminal paste is supported.\n", self.config.keybindings);
-                for (key, action) in &self.bindings.editor { text.push_str(&format!("{key}: {action}\n")); }
+                let mut text = format!(
+                    "Profile: {}\nGlobal: Tab focus; Ctrl+S save; Ctrl+Q quit\nChat: Enter submit; Ctrl+J newline; Shift+Tab agent; Tab complete\nEditor: arrows, Shift+arrows select, Home/End, PgUp/PgDown\nCopy/paste shortcuts use an internal clipboard; terminal paste is supported.\n",
+                    self.config.keybindings
+                );
+                for (key, action) in &self.bindings.editor {
+                    text.push_str(&format!("{key}: {action}\n"));
+                }
                 self.message("keys", text);
-            },
-            "/help" => self.message("help", COMMANDS.iter().map(|(c, d)| format!("{c} — {d}")).collect::<Vec<_>>().join("\n")),
+            }
+            "/help" => self.message(
+                "help",
+                COMMANDS
+                    .iter()
+                    .map(|(c, d)| format!("{c} — {d}"))
+                    .collect::<Vec<_>>()
+                    .join("\n"),
+            ),
             _ => bail!("Unknown command; use /help"),
         }
         Ok(())
@@ -602,8 +807,8 @@ impl App {
             Err(e) => self.notify(Level::Error, format!("{e:#}")),
         }
     }
-    fn request(&mut self, operation: Pending) {
-        if self.document.dirty() || self.proposal.is_some() {
+    pub(crate) fn request(&mut self, operation: Pending) {
+        if self.document.dirty() || self.proposal.is_some() || self.busy() {
             self.pending = Some(operation);
         } else {
             self.perform(operation);
@@ -642,6 +847,7 @@ impl App {
         }
     }
     fn perform(&mut self, operation: Pending) {
+        self.cancel_live();
         match operation {
             Pending::Quit => self.quit = true,
             Pending::Open(path) => match open_or_new(&path) {
@@ -658,6 +864,31 @@ impl App {
                 }
                 Err(e) => self.notify(Level::Error, format!("Cannot open: {e:#}")),
             },
+            Pending::Recover(id) => {
+                let result = self
+                    .live
+                    .store
+                    .as_ref()
+                    .context("Recovery storage unavailable")
+                    .and_then(|s| s.recover(&id))
+                    .and_then(Document::from_recovery);
+                match result {
+                    Ok(d) => {
+                        self.document = d;
+                        self.proposal = None;
+                        self.attachment = None;
+                        self.editor_scroll = 0;
+                        self.editor_horizontal = 0;
+                        self.follow_editor = true;
+                        self.focus = Focus::Editor;
+                        self.notify(
+                            Level::Success,
+                            "Recovery restored into editor only; review and save explicitly",
+                        );
+                    }
+                    Err(e) => self.notify(Level::Error, format!("Recovery failed: {e:#}")),
+                }
+            }
         }
     }
     fn resolve(&self, value: &str) -> PathBuf {
@@ -712,7 +943,7 @@ impl App {
     }
 
     pub fn mouse(&mut self, event: MouseEvent) {
-        if self.pending.is_some() || self.proposal.is_some() {
+        if self.pending.is_some() || self.proposal.is_some() || self.live.permission.is_some() {
             return;
         }
         let x = event.column;

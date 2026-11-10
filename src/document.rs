@@ -41,15 +41,31 @@ pub struct Recovery {
 
 impl Document {
     pub fn recovery(&self) -> Recovery {
-        Recovery { text: self.text.clone(), cursor: self.cursor, path: self.path.clone(), saved: self.saved.clone(), disk_baseline: self.disk_baseline.clone() }
+        Recovery {
+            text: self.text.clone(),
+            cursor: self.cursor,
+            path: self.path.clone(),
+            saved: self.saved.clone(),
+            disk_baseline: self.disk_baseline.clone(),
+        }
     }
 
     pub fn from_recovery(r: Recovery) -> Result<Self> {
-        if r.text.len() > MAX_FILE_BYTES as usize || r.saved.len() > MAX_FILE_BYTES as usize
-            || r.disk_baseline.as_ref().is_some_and(|s| s.len() > MAX_FILE_BYTES as usize) {
+        if r.text.len() > MAX_FILE_BYTES as usize
+            || r.saved.len() > MAX_FILE_BYTES as usize
+            || r.disk_baseline
+                .as_ref()
+                .is_some_and(|s| s.len() > MAX_FILE_BYTES as usize)
+        {
             bail!("Recovery exceeds document size limit");
         }
-        let mut d = Self { text: r.text, saved: r.saved, disk_baseline: r.disk_baseline, path: r.path, ..Self::default() };
+        let mut d = Self {
+            text: r.text,
+            saved: r.saved,
+            disk_baseline: r.disk_baseline,
+            path: r.path,
+            ..Self::default()
+        };
         d.move_to(r.cursor, false);
         Ok(d)
     }

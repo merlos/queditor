@@ -44,15 +44,30 @@ impl Config {
             bail!("Unknown theme; use mocha or daylight");
         }
         validate_model(&c.model)?;
-        for model in &c.models { validate_model(model)?; }
+        for model in &c.models {
+            validate_model(model)?;
+        }
         Ok(c)
     }
 }
 pub fn validate_model(model: &str) -> Result<()> {
-    if model.trim().is_empty() || model.len() > 200 || model.chars().any(char::is_control) {
+    if model.trim().is_empty() || model.len() > 200 || model.chars().any(char::is_whitespace) {
         bail!("Invalid model identifier");
     }
-    if model != "mock" { genai::Client::default_model(model).context("Unknown provider/model namespace")?; }
+    if let Some((namespace, name)) = model.split_once("::")
+        && (name.is_empty()
+            || (genai::adapter::AdapterKind::from_lower_str(namespace).is_none()
+                && !matches!(
+                    namespace,
+                    "zai_coding" | "baidu_coding_openai" | "baidu_coding_anthropic"
+                )))
+    {
+        bail!("Unknown provider namespace or empty model name");
+    }
+    if model != "mock" {
+        genai::adapter::AdapterKind::from_model(model)
+            .context("Unknown provider/model namespace")?;
+    }
     Ok(())
 }
 pub fn config_dir() -> PathBuf {
@@ -201,5 +216,20 @@ mod tests {
     #[test]
     fn rejects_unknown_fields() {
         assert!(serde_yaml_ng::from_str::<Config>("typo: true").is_err());
+    }
+    #[test]
+    fn validates_provider_namespaces_and_keeps_mock_default() {
+        assert_eq!(Config::default().model, "mock");
+        for model in [
+            "openai::gpt-4o-mini",
+            "anthropic::claude-sonnet-4-5",
+            "gemini::gemini-2.5-flash",
+            "ollama::llama3.2",
+            "genai_1::test",
+        ] {
+            assert!(validate_model(model).is_ok(), "{model}");
+        }
+        assert!(validate_model("typo::model").is_err());
+        assert!(validate_model("openai::").is_err());
     }
 }

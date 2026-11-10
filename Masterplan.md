@@ -7,7 +7,7 @@
 - Default theme: Catppuccin-inspired Mocha; contrasting daylight theme.
 - Preserve Markdown syntax in the editor; this is not a rich-text preview.
 - Agent output is a proposal, never permission to mutate or save a document.
-- Start with a mock backend. Implement one live provider behind an abstraction next.
+- Keep mock mode as default; use `genai` for many providers behind one async boundary.
 - OpenCode is an interaction reference, not a bundled dependency or a promise of parity.
 
 ## Current architecture
@@ -18,11 +18,13 @@ text, grapheme-safe byte offsets, snapshots, saved/disk baselines, and revisions
 `Config` loads defaulted YAML settings and editor-action bindings. The UI handles
 screen-column calculations independently of document byte offsets.
 
-The initial implementation deliberately has five substantive modules instead of
-empty folders. It uses `String` plus bounded snapshots instead of a rope; measure
-large-file latency before choosing incremental/rope storage. Network integration
-must first introduce effects/events and an async backend boundary. Do not call
-providers inside the renderer or synchronous key handling.
+The implementation uses substantive modules instead of empty placeholder folders.
+It uses `String` plus bounded snapshots rather than a rope; measure large-file
+latency before switching storage. `backend` runs genai streaming and tool rounds
+on Tokio, communicating through bounded channels with `live` orchestration.
+`tools` prepares anchored filesystem capabilities before permission waits, without
+reading text. `storage` handles private recovery/session/grant records outside the
+renderer. Never call providers inside rendering or synchronous key handling.
 
 ### Invariants
 
@@ -33,7 +35,10 @@ providers inside the renderer or synchronous key handling.
 5. Acceptance validates revision/original and creates one undoable edit.
 6. Save operates only on accepted text and checks external disk changes.
 7. Dirty open/quit operations require explicit confirmation.
-8. No network calls, agent file tools, or credential reads exist in the prototype.
+8. Mock mode makes no network calls; live mode sends explicit context and approved tool results only.
+9. File permissions are local/exact-path and cannot be overridden by agent prompts.
+10. Partial/cancelled/failed turns never stage generated edits or commit model-facing history.
+11. Recovery never writes the original document; session-content persistence is opt-in.
 
 ## Milestones
 
@@ -64,31 +69,38 @@ comprehensive key validation, hot reload, and richer configuration merging.
 
 ### 4. Mock chat/context — basic implementation complete
 
-Composer, slash suggestions, scrollback, agent registry, in-memory session reset,
-selection/document snapshots, honest unavailable-model/compaction responses.
+Composer, slash suggestions, scrollback, agent registry, session reset,
+selection/document snapshots, and local mock edit demonstrations.
 
-Remaining: event-driven streaming/cancellation mock, persistent sessions, command
-argument completion, and limits/policies for large attached context.
+Live streaming/tool integration, context budgets and optional persistent sessions
+have now been added. Argument completion and broader chat-interaction parity remain.
 
 ### 5. Safe edit review — local workflow implemented
 
 Deterministic proposals, colored diff, whole-proposal accept/reject, undo,
 stale revision rejection, and save exclusion. Pending proposals are modal in this
-build; concurrent generation/editing and per-hunk review remain future work.
+build. Live generation allows concurrent editing and rejects stale results.
+Per-hunk acceptance remains future work.
 
-### 6. Live AI and permissions — next major milestone
+### 6. Live AI and permissions — core implementation delivered
 
 1. Define `Backend` request, streamed event, cancellation, model and error contracts.
 2. Move effects off the terminal event loop using Tokio and bounded queues.
 3. Add deterministic streaming/error/tool mocks and reconnection tests.
-4. Implement one OpenAI-compatible adapter with credential references, never secrets in YAML.
+4. Use genai for multiple native/provider-compatible protocols and environment credentials.
 5. Send selected agent instructions and explicitly attached context only.
 6. Define and validate structured `propose_edit` output against captured revisions.
 7. Introduce read/list tools with canonical paths, symlink checks, size/text limits,
    sensitive-file exclusions and scoped permission prompts.
 8. Add allow-once/session/persistent/deny plus saved-grant review and revocation.
 9. Do not grant shell execution, deletion, or direct disk writes in the initial AI MVP.
-10. Add real `/models`, compaction, cancellation and visible provider failures.
+10. Add model selection, compaction, cancellation and sanitized provider failures.
+
+The request/event contracts, Tokio jobs, bounded queues, structured proposal loop,
+permissions/grant revocation, tool capability limits, model selection and compaction
+are implemented. Local HTTP/SSE provider fixtures exercise the real genai adapter
+without credentials. Remaining: more provider-account testing, usage reporting,
+automatic reconnect semantics, granular grant revocation, and model discovery.
 
 Gate: mock/provider tests prove agents cannot read unapproved files, silently send
 unattached document text, overwrite newer user edits, or write unaccepted proposals.
@@ -97,11 +109,12 @@ An optional OpenCode V2 HTTP adapter requires a separate authenticated discovery
 and compatibility spike. Its experimental API surface must not be assumed stable,
 and its tools must not bypass Queditor review or local permissions.
 
-### 7. Release hardening — planned
+### 7. Release hardening — recovery/persistence implemented; remainder planned
 
-Recovery, opt-in session persistence/deletion, privacy controls, clipboard support,
-large-file benchmarks, supported-terminal matrix, signal/terminal cleanup tests,
-installation packages, release CI, accessibility, complete end-to-end coverage.
+Recovery, opt-in session persistence/deletion and local privacy modes are implemented.
+Remaining: clipboard support, large-file benchmarks, supported-terminal matrix,
+broader signal/terminal compatibility, packages, accessibility and complete release coverage.
+Unix shutdown signals now checkpoint interrupted work and restore terminal state.
 
 Gate: a new user can install, configure a provider, edit, attach context, approve
 reads, request/review a revision, undo it, save, and recover interrupted work using
@@ -122,6 +135,9 @@ for terminal lifecycle (initial Unix PTY workflows are implemented in
 - Save replaces a file after baseline checks; it is not an OS-wide file-locking
   protocol, and hard-link/ACL/xattr preservation is not guaranteed.
 - Current highlighting is lexical/basic, not semantically complete Markdown.
-- Current chat is local and in-memory; interruption recovery is not available.
+- Provider compatibility varies; library support is not account-level validation.
+- Local state is private plaintext, not encrypted. Recovery can miss the latest
+  uncheckpointed second of input, and disk failures are warnings rather than guarantees.
+- Filesystem permissions are application-level capabilities, not an OS-wide sandbox.
 
 Keep this roadmap and `MASTER.md` synchronized as milestones become complete.

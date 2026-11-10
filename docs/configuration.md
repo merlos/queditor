@@ -8,6 +8,10 @@ or modify home-directory configuration automatically.
 schema_version: 1
 theme: mocha           # mocha or daylight
 keybindings: vscode    # vscode, emacs, or a custom profile filename
+model: mock            # or a genai provider::model identifier
+models: [mock]         # suggestions shown by /models
+persist_sessions: false
+recovery: true
 ```
 
 Missing fields inherit embedded defaults. Unknown fields, invalid themes, and
@@ -67,7 +71,7 @@ Names must be nonempty and unique, including against Planner/Blogger. Files with
 invalid frontmatter produce a warning while valid files continue loading.
 `/agents` lists definitions; `/agents Reviewer` selects one. Shift+Tab cycles.
 
-Definitions are loaded, but their instructions are **not sent to an LLM yet**.
-There are no provider settings, API-key settings, or agent permission files in the
-current schema. Live backend credentials and permissions will be documented when
-they are implemented; do not put secrets in these examples.
+In live mode, the selected agent's instructions become the system prompt. Agent
+instructions never override local permissions or edit-review validation.
+API keys come from provider environment variables, never this YAML.
+See [live AI](live-ai.md) for provider setup, privacy, and permissions.
