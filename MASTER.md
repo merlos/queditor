@@ -18,7 +18,7 @@ the stated subset exists, and **Planned** means not yet delivered.
 | ED-005 | Markdown/frontmatter | Partial: visible-source basic headings, emphasis, code, frontmatter colors; not a full parser. |
 | ED-006 | Clipboard | Partial: internal copy/cut/paste and terminal bracketed paste; OS clipboard pending. |
 | ED-007 | Search/replace | Implemented: `/find` and undoable `/replace` all, via chat commands. |
-| UI-001 | Responsive panes | Implemented: at least 80/40 content columns at widths >=124; stacked below that; minimum 30×10. |
+| UI-001 | Responsive panes | Implemented: at least 80/40 content columns at widths >=124; stacked below that; Unicode-aware editor soft wrapping; minimum 30×10. |
 | UI-002 | Status | Implemented: dirty filename, line/column, focus, actual model/agent, running state, labeled severity colors. |
 | UI-003 | Themes | Partial: embedded Mocha/daylight; runtime selection and startup config; custom palettes pending. |
 | FILE-001 | Open/save | Implemented: open UTF-8, create missing paths, save explicitly; directory must exist. |
@@ -26,17 +26,17 @@ the stated subset exists, and **Planned** means not yet delivered.
 | FILE-003 | Explorer | Implemented: flat current folder, parent entry, folders first, arrows/Enter/Escape, preserves chat. |
 | FILE-004 | Recovery | Implemented: private accepted-text checkpoints, explicit restore/delete, no implicit document writes. |
 | CHAT-001 | Composer | Implemented: Enter submit, Ctrl+J newline, Shift+Enter when supported, slash completion, scrollable history. |
-| CHAT-002 | Commands | Implemented: local commands, configured/arbitrary model selection, live compaction and cancellation; account model discovery pending. |
+| CHAT-002 | Commands | Implemented: local commands, keyboard/mouse guided provider and credential selection with visible text cursor and masked typing/paste, persisted agent/model/per-agent mode selection, configured/arbitrary and discovered models, live compaction and cancellation; discovery depends on provider model-list support. |
 | CHAT-003 | Sessions | Implemented: optional private history persistence, list/resume-as-new/delete; no temporary grant or pending proposal restoration. |
-| CHAT-004 | Live streaming/cancel | Implemented: genai multi-provider streaming on Tokio, bounded queues/budgets, cancellation, safe error messages. |
-| CTX-001 | Selection context | Implemented: selection indicator, explicit attachment, immutable snapshot, stale warning, clear action. |
+| CHAT-004 | Live streaming/cancel | Implemented: genai multi-provider streaming on Tokio, bounded queues/budgets, animated activity states, universal Escape cancellation, extended request/stream timeouts, safe error messages. |
+| CTX-001 | Context | Implemented: selected-line indicator, automatic immutable selection snapshot in Chat mode, complete-document snapshot in Agent mode, explicit pinned context, stale warning, clear action. |
 | AGENT-001 | Built-in agents | Implemented: selected Planner/Blogger/custom instructions are sent as the live system prompt. |
 | AGENT-002 | Custom agents | Implemented: YAML-frontmatter Markdown definitions; invalid files warn without dropping valid definitions. |
-| SAFE-001 | Proposal separation | Implemented: mock proposals and live structured propose_edit calls remain separate; live edits require explicit context and successful completion. |
-| SAFE-002 | Review | Implemented: modal whole-proposal accept/reject, stale revision/original validation, acceptance is undoable and unsaved. |
+| SAFE-001 | Proposal separation | Implemented: per-agent read-only Chat and full-document Agent modes; structured proposals require successful completion and explicit diff review. |
+| SAFE-002 | Review | Implemented: modal diff-block include/exclude plus accept/reject all, stale revision/original validation, atomic acceptance is undoable and unsaved. |
 | SAFE-003 | Save accepted text only | Implemented: a save never includes an unaccepted proposal. |
 | SAFE-004 | Agent file permissions | Implemented: read/list ask-by-default; once/session/saved exact-path grants, revocation, sensitive exclusions, anchored capabilities and size limits; no shell/writes. |
-| CFG-001 | YAML defaults | Partial: embedded defaults plus user fields, schema validation, fallback warnings; CLI overrides pending. |
+| CFG-001 | YAML defaults | Partial: embedded defaults, validated provider profiles, environment/keyring/private-file credential references, safe atomic updates and fallback warnings; CLI overrides pending. |
 | DOC-001 | Documentation | Implemented: README, MASTER, Masterplan, AGENTS, user/config guides. |
 
 Terminal startup/edit/save/review/quit workflows and restoration are covered by
@@ -55,10 +55,12 @@ and discards any proposal as the operation proceeds.
 `/rewrite` uses supplied replacement text. Neither invokes an LLM. A stale
 attachment is rejected; a stale proposal cannot be applied.
 
-Live mode is selected by `/models <provider::model>` or startup YAML `model`.
-Credentials come from genai's provider environment variables. Only explicit
-attachments and approved tool results supplement the live prompt/history.
-`/cancel` and Ctrl+C in chat discard unfinished generated proposals; model-facing
+Live mode is configured with `/connect` and selected by `/models`, direct
+`/models <provider::model>`, or startup YAML `model`. Credentials resolve from the
+environment, OS keyring, or an explicitly selected private plaintext file. Only current
+selections, pinned attachments, and approved tool results supplement the live
+prompt/history.
+Escape from either pane, `/cancel`, and Ctrl+C in chat discard unfinished generated proposals; model-facing
 history commits only after success. `/compact` summarizes history without tools.
 `/permissions` shows grants; `clear` revokes them. `/new`, `/cd`, `/resume` clear
 temporary grants. `/recover` and `/sessions` manage private local records; resume

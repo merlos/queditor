@@ -1,5 +1,5 @@
 use crate::{
-    config::{Bindings, Config, Theme, config_dir},
+    config::{AgentMode, Bindings, Config, Credential, Provider, Theme, config_dir},
     document::{Document, absolute, next, previous},
 };
 use anyhow::{Context, Result, bail};
@@ -8,12 +8,14 @@ use ratatui::layout::Rect;
 use serde::Deserialize;
 use std::{
     fs,
+    ops::Range,
     path::{Path, PathBuf},
 };
 
 pub const COMMANDS: &[(&str, &str)] = &[
     ("/new", "New chat session"),
     ("/models", "List/select model: /models [provider::model]"),
+    ("/connect", "Connect or manage an AI provider"),
     ("/quit", "Exit safely"),
     ("/exit", "Exit safely"),
     ("/compact", "Compact live conversation history"),
@@ -33,6 +35,7 @@ pub const COMMANDS: &[(&str, &str)] = &[
     ("/keys", "Current keybindings"),
     ("/theme", "Choose mocha or daylight"),
     ("/agents", "Select agent: /agents [name]"),
+    ("/mode", "Set agent mode: /mode chat|agent"),
     ("/attach", "Attach selection, document, or clear"),
     ("/demo", "Mock uppercase edit proposal"),
     ("/rewrite", "Mock proposal: /rewrite <replacement text>"),
@@ -71,6 +74,15 @@ pub struct Proposal {
     pub range: std::ops::Range<usize>,
     pub original: String,
     pub replacement: String,
+    pub hunks: Vec<ProposalHunk>,
+    pub active_hunk: usize,
+}
+pub struct ProposalHunk {
+    /// Byte range relative to `Proposal::original`.
+    pub range: Range<usize>,
+    pub original: String,
+    pub replacement: String,
+    pub included: bool,
 }
 pub struct Entry {
     pub path: PathBuf,
@@ -121,15 +133,92 @@ pub struct App {
     pub quit: bool,
     pub editor_scroll: usize,
     pub editor_horizontal: usize,
+    /// Logical line and starting display column for each visible soft-wrapped row.
+    pub editor_view_rows: Vec<(usize, usize)>,
     pub follow_editor: bool,
     pub editor_area: Rect,
     pub chat_area: Rect,
     pub composer_area: Rect,
     pub clipboard: String,
     pub dragging: bool,
+    pub connect: Option<ConnectWizard>,
+    pub connect_choice_area: Rect,
+    pub model_picker: Option<ModelPicker>,
+    pub animation_frame: usize,
+}
+
+pub struct ConnectWizard {
+    pub step: ConnectStep,
+    pub input: String,
+    pub provider_id: String,
+    pub name: String,
+    pub endpoint: String,
+    pub protocol: String,
+    pub credential: Credential,
+    pub secret: String,
+    pub provider_selected: usize,
+    pub credential_selected: usize,
+}
+
+pub const CONNECT_PROVIDER_NAMES: [&str; 5] = [
+    "OpenAI",
+    "Anthropic",
+    "Google Gemini",
+    "OpenRouter",
+    "Custom OpenAI-compatible",
+];
+pub const CONNECT_CREDENTIAL_NAMES: [&str; 3] = [
+    "OS keyring (recommended)",
+    "Environment variable",
+    "Private plaintext file",
+];
+
+impl Drop for ConnectWizard {
+    fn drop(&mut self) {
+        use zeroize::Zeroize;
+        self.secret.zeroize();
+    }
+}
+
+#[derive(Clone, Copy)]
+pub enum ConnectStep {
+    Provider,
+    Id,
+    Name,
+    Endpoint,
+    Credential,
+    Env,
+    SecretKeyring,
+    SecretFile,
+    PlaintextConfirm,
+}
+
+pub struct ModelPicker {
+    pub models: Vec<String>,
+    pub selected: usize,
+    pub scroll: usize,
 }
 
 impl App {
+    pub fn selection_label(&self) -> Option<String> {
+        let lines = self.document.selected_lines()?;
+        Some(if lines.start() == lines.end() {
+            format!("Selected line {}", lines.start())
+        } else {
+            format!("Selected lines {}:{}", lines.start(), lines.end())
+        })
+    }
+
+    pub fn selected_attachment(&self) -> Option<Attachment> {
+        let range = self.document.selection()?;
+        Some(Attachment {
+            revision: self.document.revision,
+            text: self.document.text[range.clone()].into(),
+            range,
+            label: self.selection_label()?,
+        })
+    }
+
     pub fn new(path: Option<&Path>) -> Result<Self> {
         let workspace = std::env::current_dir()?.canonicalize()?;
         let (mut config, warning) = match Config::load() {
@@ -191,23 +280,38 @@ impl App {
             quit: false,
             editor_scroll: 0,
             editor_horizontal: 0,
+            editor_view_rows: vec![],
             follow_editor: true,
             editor_area: Rect::default(),
             chat_area: Rect::default(),
             composer_area: Rect::default(),
             clipboard: String::new(),
             dragging: false,
+            connect: None,
+            connect_choice_area: Rect::default(),
+            model_picker: None,
+            animation_frame: 0,
         };
         if app.config.model == "mock" {
             app.message("system", "Mock backend — no network requests or AI inference. Use /demo or /rewrite to test safe edit review. /models selects a live provider.");
         } else {
-            app.message("system", format!("Live genai model: {}. Prompts, chat history, explicit attachments and approved file reads are sent to this provider. /attach pins editor context; /cancel stops generation.", app.config.model));
+            app.message("system", format!("Live genai model: {}. Prompts, chat history, current selections, pinned attachments, and approved file reads are sent to this provider. A selection is included automatically; /attach pins context for later prompts; /cancel stops generation.", app.config.model));
         }
         if let Err(e) = app.load_agents() {
             app.notify(
                 Level::Warning,
                 format!("Some custom agents were not loaded: {e:#}"),
             );
+        }
+        if let Some(index) = app
+            .agents
+            .iter()
+            .position(|agent| agent.name.eq_ignore_ascii_case(&app.config.agent))
+        {
+            app.agent = index;
+        } else {
+            app.config.agent = app.agents[0].name.clone();
+            app.notify(Level::Warning, "Saved agent is unavailable; using Planner");
         }
         if let Some(w) = warning.or(binding_warning) {
             app.notify(Level::Warning, w);
@@ -239,6 +343,19 @@ impl App {
     }
 
     pub fn key(&mut self, key: KeyEvent) {
+        // Escape is the universal, highest-priority interrupt while an agent is active.
+        if key.code == KeyCode::Esc && self.busy() {
+            self.cancel_live();
+            return;
+        }
+        if self.connect.is_some() {
+            self.connect_key(key);
+            return;
+        }
+        if self.model_picker.is_some() {
+            self.model_picker_key(key);
+            return;
+        }
         if self.pending.is_some() {
             self.confirm_key(key);
             return;
@@ -272,7 +389,7 @@ impl App {
                     self.review_armed = true;
                     self.notify(
                         Level::Info,
-                        "Review enabled · A/Enter accepts · R/Esc rejects",
+                        "Review enabled · ↑/↓ blocks · Space toggles · Enter applies included · A all · R/Esc rejects",
                     );
                     return;
                 }
@@ -281,15 +398,41 @@ impl App {
                 }
             }
             match key.code {
-                KeyCode::Char('a') | KeyCode::Enter => self.accept_proposal(),
+                KeyCode::Char('a') => {
+                    if let Some(proposal) = &mut self.proposal {
+                        for hunk in &mut proposal.hunks {
+                            hunk.included = true;
+                        }
+                    }
+                    self.accept_proposal();
+                }
+                KeyCode::Enter => self.accept_proposal(),
+                KeyCode::Char(' ') => {
+                    if let Some(proposal) = &mut self.proposal
+                        && let Some(hunk) = proposal.hunks.get_mut(proposal.active_hunk)
+                    {
+                        hunk.included = !hunk.included;
+                    }
+                }
                 KeyCode::Char('r') | KeyCode::Esc => {
                     self.proposal = None;
                     self.editor_scroll = 0;
                     self.follow_editor = true;
                     self.notify(Level::Info, "Proposal rejected; document unchanged");
                 }
-                KeyCode::Up => self.editor_scroll = self.editor_scroll.saturating_sub(1),
-                KeyCode::Down => self.editor_scroll += 1,
+                KeyCode::Up => {
+                    if let Some(proposal) = &mut self.proposal {
+                        proposal.active_hunk = proposal.active_hunk.saturating_sub(1);
+                        self.editor_scroll = 0;
+                    }
+                }
+                KeyCode::Down => {
+                    if let Some(proposal) = &mut self.proposal {
+                        proposal.active_hunk =
+                            (proposal.active_hunk + 1).min(proposal.hunks.len().saturating_sub(1));
+                        self.editor_scroll = 0;
+                    }
+                }
                 KeyCode::PageUp => self.editor_scroll = self.editor_scroll.saturating_sub(10),
                 KeyCode::PageDown => self.editor_scroll += 10,
                 _ => {}
@@ -310,9 +453,18 @@ impl App {
         }
         if key.code == KeyCode::BackTab {
             if self.focus == Focus::Chat {
-                self.agent = (self.agent + 1) % self.agents.len();
+                let next = (self.agent + 1) % self.agents.len();
+                if let Err(error) = self.select_agent(next) {
+                    self.notify(Level::Error, format!("Could not remember agent: {error:#}"));
+                }
             } else {
                 self.focus = Focus::Chat;
+            }
+            return;
+        }
+        if ctrl && key.code == KeyCode::Char('g') {
+            if let Err(error) = self.toggle_agent_mode() {
+                self.notify(Level::Error, format!("Could not remember mode: {error:#}"));
             }
             return;
         }
@@ -396,6 +548,7 @@ impl App {
             }
             "delete" => self.document.delete(),
             "backspace" => self.document.backspace(),
+            "kill_line" => self.document.kill_line(),
             "mark" => self.document.anchor = Some(self.document.cursor),
             "select_all" => {
                 self.document.anchor = Some(0);
@@ -502,7 +655,11 @@ impl App {
     }
 
     pub fn paste(&mut self, text: &str) {
-        if self.pending.is_some() || self.proposal.is_some() {
+        if self.connect.is_some() {
+            self.connect_paste(text);
+            return;
+        }
+        if self.pending.is_some() || self.proposal.is_some() || self.model_picker.is_some() {
             return;
         }
         if self.focus == Focus::Editor {
@@ -510,6 +667,30 @@ impl App {
             self.follow_editor = true;
         } else if self.explorer.is_none() {
             self.compose_insert(text);
+        }
+    }
+
+    fn connect_paste(&mut self, text: &str) {
+        let Some(wizard) = self.connect.as_mut() else {
+            return;
+        };
+        let target = match wizard.step {
+            ConnectStep::SecretKeyring | ConnectStep::SecretFile => &mut wizard.secret,
+            ConnectStep::Id | ConnectStep::Name | ConnectStep::Endpoint | ConnectStep::Env => {
+                &mut wizard.input
+            }
+            ConnectStep::Provider | ConnectStep::Credential | ConnectStep::PlaintextConfirm => {
+                return;
+            }
+        };
+        for character in text.trim().chars() {
+            if matches!(character, '\r' | '\n') || character.is_control() {
+                continue;
+            }
+            if target.len() + character.len_utf8() > 2048 {
+                break;
+            }
+            target.push(character);
         }
     }
 
@@ -576,11 +757,13 @@ impl App {
                     bail!("Cancel the current agent before changing model");
                 }
                 if let Some(model) = arg {
-                    crate::config::validate_model(model)?;
-                    self.config.model = model.into();
+                    self.config.validate_model_ref(model)?;
+                    self.select_model(model.to_owned())?;
+                } else {
+                    self.open_model_picker();
                 }
-                self.message("system", format!("Current: {}\nConfigured: {}\nUse /models <provider::model> or /models mock. Live requests send committed conversation history to the selected provider; /new clears it.", self.config.model, self.config.models.join(", ")));
             }
+            "/connect" => self.connect_command(&args)?,
             "/compact" => {
                 self.start_live("Summarize the conversation for continuation.", true)?;
             }
@@ -636,11 +819,12 @@ impl App {
             }
             "/agents" => {
                 if let Some(name) = arg {
-                    self.agent = self
+                    let index = self
                         .agents
                         .iter()
                         .position(|a| a.name.eq_ignore_ascii_case(name))
                         .context("Unknown agent")?;
+                    self.select_agent(index)?;
                 }
                 self.message(
                     "system",
@@ -650,6 +834,14 @@ impl App {
                         .collect::<Vec<_>>()
                         .join("\n"),
                 );
+            }
+            "/mode" => {
+                let mode = match arg {
+                    Some("chat") => AgentMode::Chat,
+                    Some("agent") => AgentMode::Agent,
+                    _ => bail!("Usage: /mode chat|agent"),
+                };
+                self.select_agent_mode(mode)?;
             }
             "/attach" => {
                 if arg == Some("clear") {
@@ -712,13 +904,13 @@ impl App {
                 if original == replacement {
                     bail!("Mock proposal has no changes");
                 }
-                self.proposal = Some(Proposal {
-                    mock: true,
-                    revision: self.document.revision,
+                self.proposal = Some(Proposal::new(
+                    true,
+                    self.document.revision,
                     range,
                     original,
                     replacement,
-                });
+                ));
                 self.review_armed = true;
                 self.editor_scroll = 0;
                 self.notify(
@@ -778,6 +970,411 @@ impl App {
         Ok(())
     }
 
+    fn connect_command(&mut self, args: &[String]) -> Result<()> {
+        if self.busy() || self.live.discovery.is_some() {
+            bail!("Cancel or wait for the current provider operation first");
+        }
+        if args.get(1).is_some_and(|arg| arg == "delete") {
+            let id = args.get(2).context("Usage: /connect delete <provider>")?;
+            let provider = self
+                .config
+                .providers
+                .remove(id)
+                .context("Unknown provider")?;
+            let previous_model = self.config.model.clone();
+            if self.config.model.starts_with(&format!("{id}::")) {
+                self.config.model = "mock".into();
+            }
+            if let Err(error) = self.config.save() {
+                self.config.providers.insert(id.clone(), provider);
+                self.config.model = previous_model;
+                return Err(error);
+            }
+            crate::credentials::delete(&provider.credential)?;
+            self.notify(
+                Level::Success,
+                format!("Provider {id} and its saved credential were removed"),
+            );
+            return Ok(());
+        }
+        self.connect = Some(ConnectWizard {
+            step: ConnectStep::Provider,
+            input: String::new(),
+            provider_id: String::new(),
+            name: String::new(),
+            endpoint: String::new(),
+            protocol: "openai_compatible".into(),
+            credential: Credential::default(),
+            secret: String::new(),
+            provider_selected: 0,
+            credential_selected: 0,
+        });
+        Ok(())
+    }
+
+    pub fn open_model_picker(&mut self) {
+        let mut models = vec!["mock".to_owned()];
+        models.extend(self.config.models.iter().filter(|m| *m != "mock").cloned());
+        for (id, provider) in &self.config.providers {
+            models.extend(provider.models.iter().map(|model| format!("{id}::{model}")));
+        }
+        models.sort();
+        models.dedup();
+        if let Some(index) = models.iter().position(|model| model == &self.config.model) {
+            models.swap(0, index);
+        }
+        self.model_picker = Some(ModelPicker {
+            models,
+            selected: 0,
+            scroll: 0,
+        });
+    }
+
+    fn model_picker_key(&mut self, key: KeyEvent) {
+        let Some(picker) = self.model_picker.as_mut() else {
+            return;
+        };
+        match key.code {
+            KeyCode::Esc => self.model_picker = None,
+            KeyCode::Up => picker.selected = picker.selected.saturating_sub(1),
+            KeyCode::Down => {
+                picker.selected = (picker.selected + 1).min(picker.models.len().saturating_sub(1))
+            }
+            KeyCode::Enter => {
+                let model = picker.models[picker.selected].clone();
+                self.model_picker = None;
+                if let Err(error) = self.select_model(model) {
+                    self.notify(Level::Error, format!("Could not remember model: {error:#}"));
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn select_model(&mut self, model: String) -> Result<()> {
+        let previous = std::mem::replace(&mut self.config.model, model.clone());
+        if let Err(error) = self.config.save() {
+            self.config.model = previous;
+            return Err(error);
+        }
+        self.notify(
+            Level::Success,
+            format!("Model selected and remembered: {model}"),
+        );
+        Ok(())
+    }
+
+    fn select_agent(&mut self, index: usize) -> Result<()> {
+        let previous_index = self.agent;
+        let previous_name = self.config.agent.clone();
+        let name = self
+            .agents
+            .get(index)
+            .context("Unknown agent")?
+            .name
+            .clone();
+        self.agent = index;
+        self.config.agent = name.clone();
+        if let Err(error) = self.config.save() {
+            self.agent = previous_index;
+            self.config.agent = previous_name;
+            return Err(error);
+        }
+        self.notify(
+            Level::Success,
+            format!("Agent selected and remembered: {name}"),
+        );
+        Ok(())
+    }
+
+    pub fn agent_mode(&self) -> AgentMode {
+        self.config
+            .agent_modes
+            .get(&self.agents[self.agent].name)
+            .copied()
+            .unwrap_or_default()
+    }
+
+    fn select_agent_mode(&mut self, mode: AgentMode) -> Result<()> {
+        let name = self.agents[self.agent].name.clone();
+        let previous = self.config.agent_modes.insert(name.clone(), mode);
+        if let Err(error) = self.config.save() {
+            if let Some(previous) = previous {
+                self.config.agent_modes.insert(name, previous);
+            } else {
+                self.config.agent_modes.remove(&name);
+            }
+            return Err(error);
+        }
+        self.notify(
+            Level::Success,
+            format!("{} mode selected and remembered for {name}", mode.label()),
+        );
+        Ok(())
+    }
+
+    fn toggle_agent_mode(&mut self) -> Result<()> {
+        self.select_agent_mode(match self.agent_mode() {
+            AgentMode::Chat => AgentMode::Agent,
+            AgentMode::Agent => AgentMode::Chat,
+        })
+    }
+
+    fn connect_key(&mut self, key: KeyEvent) {
+        if key.code == KeyCode::Esc {
+            if let Some(mut wizard) = self.connect.take() {
+                wizard.secret.clear();
+            }
+            self.notify(Level::Info, "Provider setup cancelled");
+            return;
+        }
+        let Some(wizard) = self.connect.as_mut() else {
+            return;
+        };
+        match wizard.step {
+            ConnectStep::Provider => match key.code {
+                KeyCode::Up => {
+                    wizard.provider_selected = wizard.provider_selected.saturating_sub(1)
+                }
+                KeyCode::Down => {
+                    wizard.provider_selected =
+                        (wizard.provider_selected + 1).min(CONNECT_PROVIDER_NAMES.len() - 1)
+                }
+                KeyCode::Enter => self.select_connect_provider(),
+                KeyCode::Char('o') => self.select_connect_provider_at(0),
+                KeyCode::Char('a') => self.select_connect_provider_at(1),
+                KeyCode::Char('g') => self.select_connect_provider_at(2),
+                KeyCode::Char('r') => self.select_connect_provider_at(3),
+                KeyCode::Char('c') => self.select_connect_provider_at(4),
+                _ => {}
+            },
+            ConnectStep::Credential => match key.code {
+                KeyCode::Up => {
+                    wizard.credential_selected = wizard.credential_selected.saturating_sub(1)
+                }
+                KeyCode::Down => {
+                    wizard.credential_selected =
+                        (wizard.credential_selected + 1).min(CONNECT_CREDENTIAL_NAMES.len() - 1)
+                }
+                KeyCode::Enter => self.select_connect_credential(),
+                KeyCode::Char('k') => self.select_connect_credential_at(0),
+                KeyCode::Char('e') => self.select_connect_credential_at(1),
+                KeyCode::Char('f') => self.select_connect_credential_at(2),
+                _ => {}
+            },
+            ConnectStep::PlaintextConfirm => match key.code {
+                KeyCode::Char('y') => wizard.step = ConnectStep::SecretFile,
+                KeyCode::Char('n') => wizard.step = ConnectStep::Credential,
+                _ => {}
+            },
+            _ => match key.code {
+                KeyCode::Backspace => {
+                    let target = if matches!(
+                        wizard.step,
+                        ConnectStep::SecretKeyring | ConnectStep::SecretFile
+                    ) {
+                        &mut wizard.secret
+                    } else {
+                        &mut wizard.input
+                    };
+                    target.pop();
+                }
+                KeyCode::Enter => self.advance_connect(),
+                KeyCode::Char(c)
+                    if !key
+                        .modifiers
+                        .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) =>
+                {
+                    let target = if matches!(
+                        wizard.step,
+                        ConnectStep::SecretKeyring | ConnectStep::SecretFile
+                    ) {
+                        &mut wizard.secret
+                    } else {
+                        &mut wizard.input
+                    };
+                    if target.len() < 2048 {
+                        target.push(c);
+                    }
+                }
+                _ => {}
+            },
+        }
+    }
+
+    fn select_connect_provider(&mut self) {
+        let selected = self
+            .connect
+            .as_ref()
+            .map(|wizard| wizard.provider_selected)
+            .unwrap_or_default();
+        self.select_connect_provider_at(selected);
+    }
+
+    fn select_connect_provider_at(&mut self, selected: usize) {
+        let Some(wizard) = self.connect.as_mut() else {
+            return;
+        };
+        wizard.provider_selected = selected.min(CONNECT_PROVIDER_NAMES.len() - 1);
+        match wizard.provider_selected {
+            0 => {
+                wizard.provider_id = "openai".into();
+                wizard.name = "OpenAI".into();
+                wizard.endpoint = "https://api.openai.com/v1/".into();
+                wizard.protocol = "openai".into();
+                wizard.step = ConnectStep::Credential;
+            }
+            1 => {
+                wizard.provider_id = "anthropic".into();
+                wizard.name = "Anthropic".into();
+                wizard.endpoint = "https://api.anthropic.com/".into();
+                wizard.protocol = "anthropic".into();
+                wizard.step = ConnectStep::Credential;
+            }
+            2 => {
+                wizard.provider_id = "gemini".into();
+                wizard.name = "Google Gemini".into();
+                wizard.endpoint = "https://generativelanguage.googleapis.com/v1beta/".into();
+                wizard.protocol = "gemini".into();
+                wizard.step = ConnectStep::Credential;
+            }
+            3 => {
+                wizard.provider_id = "openrouter".into();
+                wizard.name = "OpenRouter".into();
+                wizard.endpoint = "https://openrouter.ai/api/v1/".into();
+                wizard.protocol = "openrouter".into();
+                wizard.step = ConnectStep::Credential;
+            }
+            _ => wizard.step = ConnectStep::Id,
+        }
+    }
+
+    fn select_connect_credential(&mut self) {
+        let selected = self
+            .connect
+            .as_ref()
+            .map(|wizard| wizard.credential_selected)
+            .unwrap_or_default();
+        self.select_connect_credential_at(selected);
+    }
+
+    fn select_connect_credential_at(&mut self, selected: usize) {
+        let Some(wizard) = self.connect.as_mut() else {
+            return;
+        };
+        wizard.credential_selected = selected.min(CONNECT_CREDENTIAL_NAMES.len() - 1);
+        wizard.step = match wizard.credential_selected {
+            0 => ConnectStep::SecretKeyring,
+            1 => ConnectStep::Env,
+            _ => ConnectStep::PlaintextConfirm,
+        };
+    }
+
+    fn advance_connect(&mut self) {
+        let result = (|| -> Result<bool> {
+            let wizard = self.connect.as_mut().context("No provider setup")?;
+            match wizard.step {
+                ConnectStep::Id => {
+                    let id = wizard.input.trim();
+                    if id.is_empty()
+                        || id.len() > 64
+                        || !id
+                            .chars()
+                            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_'))
+                    {
+                        bail!("Use letters, numbers, '-' or '_' for the provider ID");
+                    }
+                    if self.config.providers.contains_key(id) {
+                        bail!("That provider ID already exists");
+                    }
+                    wizard.provider_id = id.into();
+                    wizard.input.clear();
+                    wizard.step = ConnectStep::Name;
+                }
+                ConnectStep::Name => {
+                    wizard.name = wizard.input.trim().to_owned();
+                    if wizard.name.is_empty() {
+                        bail!("Provider name cannot be empty");
+                    }
+                    wizard.input.clear();
+                    wizard.step = ConnectStep::Endpoint;
+                }
+                ConnectStep::Endpoint => {
+                    wizard.endpoint = crate::provider::normalize_endpoint(wizard.input.trim())?;
+                    wizard.input.clear();
+                    wizard.step = ConnectStep::Credential;
+                }
+                ConnectStep::Env => {
+                    let env = wizard.input.trim();
+                    if env.is_empty()
+                        || !env
+                            .chars()
+                            .all(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || c == '_')
+                    {
+                        bail!("Use an uppercase environment variable name such as OPENAI_API_KEY");
+                    }
+                    wizard.credential.env = Some(env.into());
+                    return Ok(true);
+                }
+                ConnectStep::SecretKeyring | ConnectStep::SecretFile => {
+                    if wizard.secret.is_empty() {
+                        bail!("API key cannot be empty");
+                    }
+                    return Ok(true);
+                }
+                _ => {}
+            }
+            Ok(false)
+        })();
+        match result {
+            Ok(true) => self.finish_connect(),
+            Ok(false) => {}
+            Err(error) => self.notify(Level::Error, format!("{error:#}")),
+        }
+    }
+
+    fn finish_connect(&mut self) {
+        let result = (|| -> Result<String> {
+            let mut wizard = self.connect.take().context("No provider setup")?;
+            let id = wizard.provider_id.clone();
+            if self.config.providers.contains_key(&id) {
+                bail!("Provider {id} already exists; use /connect delete {id} first");
+            }
+            if matches!(
+                wizard.step,
+                ConnectStep::SecretKeyring | ConnectStep::SecretFile
+            ) {
+                let secret = secrecy::SecretString::from(std::mem::take(&mut wizard.secret));
+                if matches!(wizard.step, ConnectStep::SecretKeyring) {
+                    crate::credentials::save_keyring(&id, &secret)?;
+                    wizard.credential.keyring = Some(id.clone());
+                } else {
+                    crate::credentials::save_file(&id, &secret)?;
+                    wizard.credential.file = Some(id.clone());
+                }
+            }
+            let provider = Provider {
+                name: std::mem::take(&mut wizard.name),
+                protocol: std::mem::take(&mut wizard.protocol),
+                base_url: crate::provider::normalize_endpoint(&wizard.endpoint)?,
+                credential: std::mem::take(&mut wizard.credential),
+                models: vec![],
+            };
+            self.config.providers.insert(id.clone(), provider);
+            if let Err(error) = self.config.save() {
+                if let Some(provider) = self.config.providers.remove(&id) {
+                    let _ = crate::credentials::delete(&provider.credential);
+                }
+                bail!("Could not save provider: {error:#}");
+            }
+            self.discover_provider(id.clone())?;
+            Ok(id)
+        })();
+        if let Err(error) = result {
+            self.notify(Level::Error, format!("Provider setup failed: {error:#}"));
+        }
+    }
+
     pub fn accept_proposal(&mut self) {
         let Some(p) = self.proposal.take() else {
             return;
@@ -790,7 +1387,14 @@ impl App {
                 "Proposal is stale; regenerate it. Document unchanged.",
             );
         } else {
-            self.document.replace(p.range, &p.replacement);
+            let replacement = p.included_replacement();
+            if replacement == p.original {
+                self.notify(Level::Info, "No included changes; document unchanged");
+                self.editor_scroll = 0;
+                self.follow_editor = true;
+                return;
+            }
+            self.document.replace(p.range, &replacement);
             self.attachment = None;
             self.notify(
                 Level::Success,
@@ -943,7 +1547,15 @@ impl App {
     }
 
     pub fn mouse(&mut self, event: MouseEvent) {
-        if self.pending.is_some() || self.proposal.is_some() || self.live.permission.is_some() {
+        if self.connect.is_some() {
+            self.connect_mouse(event);
+            return;
+        }
+        if self.pending.is_some()
+            || self.proposal.is_some()
+            || self.live.permission.is_some()
+            || self.model_picker.is_some()
+        {
             return;
         }
         let x = event.column;
@@ -953,8 +1565,11 @@ impl App {
                 MouseEventKind::Down(MouseButton::Left)
                 | MouseEventKind::Drag(MouseButton::Left) => {
                     self.focus = Focus::Editor;
-                    let row = self.editor_scroll + usize::from(y - self.editor_area.y);
-                    let col = self.editor_horizontal + usize::from(x - self.editor_area.x);
+                    let visible = usize::from(y - self.editor_area.y);
+                    let Some((row, start)) = self.editor_view_rows.get(visible).copied() else {
+                        return;
+                    };
+                    let col = start + usize::from(x - self.editor_area.x);
                     let p = self.document.position_at_display(row, col);
                     self.document.move_to(
                         p,
@@ -1002,6 +1617,23 @@ impl App {
         }
         if matches!(event.kind, MouseEventKind::Up(_)) {
             self.dragging = false;
+        }
+    }
+
+    fn connect_mouse(&mut self, event: MouseEvent) {
+        if !matches!(event.kind, MouseEventKind::Down(MouseButton::Left))
+            || event.column < self.connect_choice_area.x
+            || event.column >= self.connect_choice_area.right()
+            || event.row < self.connect_choice_area.y
+            || event.row >= self.connect_choice_area.bottom()
+        {
+            return;
+        }
+        let selected = usize::from(event.row - self.connect_choice_area.y);
+        match self.connect.as_ref().map(|wizard| wizard.step) {
+            Some(ConnectStep::Provider) => self.select_connect_provider_at(selected),
+            Some(ConnectStep::Credential) => self.select_connect_credential_at(selected),
+            _ => {}
         }
     }
 
@@ -1059,6 +1691,80 @@ impl App {
         }
         Ok(())
     }
+}
+
+impl AgentMode {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Chat => "CHAT",
+            Self::Agent => "AGENT",
+        }
+    }
+}
+
+impl Proposal {
+    pub fn new(
+        mock: bool,
+        revision: u64,
+        range: Range<usize>,
+        original: String,
+        replacement: String,
+    ) -> Self {
+        let diff = similar::TextDiff::from_lines(&original, &replacement);
+        let old_offsets = line_offsets(&original);
+        let new_offsets = line_offsets(&replacement);
+        let hunks = diff
+            .grouped_ops(3)
+            .into_iter()
+            .filter_map(|operations| {
+                let first = operations.first()?;
+                let last = operations.last()?;
+                let old = first.old_range().start..last.old_range().end;
+                let new = first.new_range().start..last.new_range().end;
+                let old_range = old_offsets[old.start]..old_offsets[old.end];
+                let new_range = new_offsets[new.start]..new_offsets[new.end];
+                Some(ProposalHunk {
+                    original: original[old_range.clone()].into(),
+                    replacement: replacement[new_range].into(),
+                    range: old_range,
+                    included: true,
+                })
+            })
+            .collect();
+        Self {
+            mock,
+            revision,
+            range,
+            original,
+            replacement,
+            hunks,
+            active_hunk: 0,
+        }
+    }
+
+    pub fn included_replacement(&self) -> String {
+        let mut output = String::new();
+        let mut cursor = 0;
+        for hunk in &self.hunks {
+            output.push_str(&self.original[cursor..hunk.range.start]);
+            if hunk.included {
+                output.push_str(&hunk.replacement);
+            } else {
+                output.push_str(&self.original[hunk.range.clone()]);
+            }
+            cursor = hunk.range.end;
+        }
+        output.push_str(&self.original[cursor..]);
+        output
+    }
+}
+
+fn line_offsets(text: &str) -> Vec<usize> {
+    let mut offsets = vec![0];
+    for line in text.split_inclusive('\n') {
+        offsets.push(offsets.last().copied().unwrap_or(0) + line.len());
+    }
+    offsets
 }
 
 impl Explorer {
@@ -1158,6 +1864,52 @@ mod tests {
         assert_eq!(a.document.text, "hello");
     }
     #[test]
+    fn individual_diff_blocks_apply_atomically() {
+        let mut a = app();
+        let original = "one\nkeep a\nkeep b\nkeep c\nkeep d\nkeep e\nkeep f\nkeep g\nkeep h\nten\n";
+        let replacement =
+            "ONE\nkeep a\nkeep b\nkeep c\nkeep d\nkeep e\nkeep f\nkeep g\nkeep h\nTEN\n";
+        a.document.insert(original);
+        a.proposal = Some(Proposal::new(
+            false,
+            a.document.revision,
+            0..original.len(),
+            original.into(),
+            replacement.into(),
+        ));
+        assert_eq!(a.proposal.as_ref().unwrap().hunks.len(), 2);
+        a.proposal.as_mut().unwrap().hunks[1].included = false;
+        a.accept_proposal();
+        assert_eq!(
+            a.document.text,
+            "ONE\nkeep a\nkeep b\nkeep c\nkeep d\nkeep e\nkeep f\nkeep g\nkeep h\nten\n"
+        );
+        a.document.undo();
+        assert_eq!(a.document.text, original);
+    }
+    #[test]
+    fn proposals_support_empty_documents_and_complete_deletion() {
+        let insertion = Proposal::new(false, 0, 0..0, String::new(), "hello\n".into());
+        assert_eq!(insertion.hunks.len(), 1);
+        assert_eq!(insertion.included_replacement(), "hello\n");
+
+        let deletion = Proposal::new(false, 0, 0..6, "hello\n".into(), String::new());
+        assert_eq!(deletion.hunks.len(), 1);
+        assert_eq!(deletion.included_replacement(), "");
+    }
+    #[test]
+    fn agent_modes_are_independent_per_agent() {
+        let mut a = app();
+        a.config.agent_modes.clear();
+        assert_eq!(a.agent_mode(), AgentMode::Chat);
+        a.config
+            .agent_modes
+            .insert("Planner".into(), AgentMode::Agent);
+        assert_eq!(a.agent_mode(), AgentMode::Agent);
+        a.agent = 1;
+        assert_eq!(a.agent_mode(), AgentMode::Chat);
+    }
+    #[test]
     fn stale_proposal_does_not_overwrite_edits() {
         let mut a = app();
         a.document.insert("hello");
@@ -1177,6 +1929,30 @@ mod tests {
         assert!(a.command("/demo").is_err());
     }
     #[test]
+    fn current_selection_becomes_labeled_prompt_attachment() {
+        let mut a = app();
+        a.document.insert("one\ntwo\nthree");
+        a.document.move_to(4, false);
+        a.document.move_to(13, true);
+
+        let attachment = a.selected_attachment().unwrap();
+        assert_eq!(attachment.text, "two\nthree");
+        assert_eq!(attachment.label, "Selected lines 2:3");
+        assert_eq!(attachment.revision, a.document.revision);
+        assert_eq!(attachment.range, 4..13);
+    }
+    #[test]
+    fn single_line_selection_uses_singular_label() {
+        let mut a = app();
+        a.document.insert("one\ntwo\nthree");
+        a.document.move_to(4, false);
+        a.document.move_to(7, true);
+
+        let attachment = a.selected_attachment().unwrap();
+        assert_eq!(attachment.text, "two");
+        assert_eq!(attachment.label, "Selected line 2");
+    }
+    #[test]
     fn quoted_commands_and_replace_are_undoable() {
         let mut a = app();
         a.document.insert("hello world hello world");
@@ -1186,6 +1962,21 @@ mod tests {
         assert_eq!(a.document.text, "hello world hello world");
     }
     #[test]
+    fn default_control_line_shortcuts_move_and_delete() {
+        let mut a = app();
+        a.document.insert("one two\nthree");
+        a.document.move_to(5, false);
+        a.key(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::CONTROL));
+        assert_eq!(a.document.cursor, 0);
+        a.key(KeyEvent::new(KeyCode::Char('e'), KeyModifiers::CONTROL));
+        assert_eq!(a.document.cursor, 7);
+        a.document.move_to(4, false);
+        a.key(KeyEvent::new(KeyCode::Char('k'), KeyModifiers::CONTROL));
+        assert_eq!(a.document.text, "one \nthree");
+        a.document.undo();
+        assert_eq!(a.document.text, "one two\nthree");
+    }
+    #[test]
     fn pasted_newlines_do_not_submit() {
         let mut a = app();
         a.focus = Focus::Chat;
@@ -1193,6 +1984,64 @@ mod tests {
         a.paste("one\ntwo");
         assert_eq!(a.composer, "one\ntwo");
         assert_eq!(a.messages.len(), before);
+    }
+    #[test]
+    fn terminal_paste_populates_masked_api_key_without_touching_chat() {
+        let mut a = app();
+        let before = a.messages.len();
+        a.command("/connect").unwrap();
+        a.key(KeyEvent::new(KeyCode::Char('o'), KeyModifiers::NONE));
+        a.key(KeyEvent::new(KeyCode::Char('k'), KeyModifiers::NONE));
+        a.paste("  secret-key\r\n");
+
+        let wizard = a.connect.as_ref().unwrap();
+        assert_eq!(wizard.secret, "secret-key");
+        assert!(wizard.input.is_empty());
+        assert!(a.composer.is_empty());
+        assert_eq!(a.messages.len(), before);
+    }
+    #[test]
+    fn connect_provider_list_supports_arrows_enter_and_mouse() {
+        let mut a = app();
+        a.command("/connect").unwrap();
+        a.key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+        a.key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+        assert_eq!(a.connect.as_ref().unwrap().provider_selected, 2);
+        a.key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert_eq!(a.connect.as_ref().unwrap().provider_id, "gemini");
+
+        a.connect = None;
+        a.command("/connect").unwrap();
+        a.connect_choice_area = Rect::new(10, 5, 40, CONNECT_PROVIDER_NAMES.len() as u16);
+        a.mouse(MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: 12,
+            row: 8,
+            modifiers: KeyModifiers::NONE,
+        });
+        assert_eq!(a.connect.as_ref().unwrap().provider_id, "openrouter");
+    }
+    #[test]
+    fn connect_credential_list_supports_arrows_enter_and_mouse() {
+        let mut a = app();
+        a.command("/connect").unwrap();
+        a.select_connect_provider_at(0);
+        a.key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+        a.key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert!(matches!(a.connect.as_ref().unwrap().step, ConnectStep::Env));
+
+        a.connect.as_mut().unwrap().step = ConnectStep::Credential;
+        a.connect_choice_area = Rect::new(10, 5, 40, CONNECT_CREDENTIAL_NAMES.len() as u16);
+        a.mouse(MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: 12,
+            row: 7,
+            modifiers: KeyModifiers::NONE,
+        });
+        assert!(matches!(
+            a.connect.as_ref().unwrap().step,
+            ConnectStep::PlaintextConfirm
+        ));
     }
     #[test]
     fn saving_excludes_unaccepted_proposal() {

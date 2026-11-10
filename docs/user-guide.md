@@ -5,12 +5,20 @@
 Start with `queditor [file]`. Type in the editor. Tab switches editor/chat focus.
 Arrows move; Shift+arrows select. Ctrl+Left/Right moves by word. Home/End moves to
 line boundaries, Ctrl+Home/End to document boundaries, and PageUp/Down by ten lines.
+Ctrl+A/E moves to the beginning/end of the current line. Ctrl+K deletes from the
+cursor to the end of that line without deleting the newline; the deletion is undoable.
 Click to position the cursor, drag to select, and use the wheel to scroll.
-The editor scrolls horizontally rather than wrapping long lines.
+Long lines soft-wrap to the editor width without changing the document. Cursor
+movement and mouse positioning continue to use the underlying logical line.
 
 Copy/cut/paste editing shortcuts use a local internal clipboard. Terminal paste
 is also supported through bracketed paste. Pasted newlines never submit chat.
 Undo/redo follows the selected editing profile; `/keys` shows the actual bindings.
+Terminal paste also works in `/connect` text and API-key fields. API keys remain
+masked; surrounding whitespace and pasted line breaks are discarded.
+On the `/connect` provider and credential-source lists, use Up/Down and Enter or
+click a row. Editable wizard fields display the terminal cursor, including the
+masked API-key field.
 
 At widths >=124 columns, panels have at least 80 and 40 usable columns. Below
 that, the editor sits above chat. Terminals smaller than 30×10 show a resize message.
@@ -50,16 +58,22 @@ Enter submits. Ctrl+J inserts a newline; Shift+Enter works in terminals that
 distinguish it. Typing `/` shows suggestions: arrows select, Tab completes.
 Escape clears unsent input. PageUp/PageDown or the wheel scroll chat. Scrolling
 away from the bottom stops auto-follow until you return to the bottom.
-Shift+Tab cycles agents while chat is focused.
+Shift+Tab cycles agents while chat is focused. Ctrl+G toggles the selected agent
+between read-only Chat mode and editing Agent mode; `/mode chat` and `/mode agent`
+select explicitly. Each agent's mode, the selected agent, and the model are saved
+to `config.yaml` and restored on the next launch.
 
-Select editor text, switch to chat, and run `/attach`. This pins a snapshot and
-shows its byte count. `/attach document` explicitly attaches all text; `/attach
-clear` removes it. Later edits make the snapshot stale; reattach before using it
-for a proposal or live prompt. Mock mode sends nothing to a provider. Live mode
-sends explicitly attached text and committed history to the selected provider.
+Select editor text and switch to chat. `Selected line X` or `Selected lines X:Y`
+appears above the prompt, and the current selection is automatically snapshotted and sent as important
+context with the next live prompt—no additional command is required. The snapshot
+can also be the target of a proposed edit. If there is no current selection,
+`/attach` pins the selection for later prompts, `/attach document` explicitly pins
+all text, and `/attach clear` removes that pinned context. Later edits can make a
+pinned snapshot stale. Mock mode sends nothing to a provider. Live mode sends the
+selection or pinned attachment and committed history to the selected provider.
 
 `/new` clears active chat/context/temporary grants but keeps the open document.
-`/models` lists configured models; `/models <provider::model>` selects one.
+`/models` lists configured models; `/models <provider::model>` selects and remembers one.
 `/models mock` returns to offline mode. `/compact` summarizes committed live
 history while retaining the visible transcript. `/cancel` stops an active request.
 Optional persistence and recovery are described in [live AI](live-ai.md).
@@ -80,12 +94,21 @@ discards the proposal. Cancel the confirmation to return to review.
 
 ## Live edits and file permissions
 
-Live edits require an explicit `/attach` snapshot. Ask the agent to revise it;
-`propose_edit` stages a replacement only after successful turn completion. A/R
-review and undo work as in the mock demonstration, but live results require Ctrl+R
-to enable acceptance first (preventing queued typing from accepting unseen edits).
-You may edit during generation;
-stale results are rejected.
+Chat mode has no edit tool: it answers questions, critiques text, and can describe
+suggested changes without staging them. Agent mode sends a snapshot of the complete
+open document and may propose a complete revised document based on the prompt. A
+selection is highlighted as important context but does not restrict the editable
+range. The result is never applied or saved automatically.
+
+Live results require Ctrl+R to open review, preventing queued typing from accepting
+unseen edits. Up/Down selects a changed block, Space includes/excludes that block,
+Enter applies all included blocks, A accepts all blocks immediately, and R/Escape
+rejects the proposal. Included blocks are validated and applied together as one
+undoable edit. You may edit during generation; stale results are rejected.
+
+Escape cancels active agent work from either pane, including thinking, streaming,
+tool work, provider waits, and permission waits. The chat title animates and reports
+the active state while work is in progress.
 
 `read_file` and `list_directory` show a permission dialog with the canonical path
 and operation. O allows once, S for the session, A persistently for that exact

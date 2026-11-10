@@ -31,6 +31,10 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
             confirmation(frame, app);
         } else if app.live.permission.is_some() {
             permission(frame, app);
+        } else if app.connect.is_some() {
+            connect(frame, app);
+        } else if app.model_picker.is_some() {
+            model_picker(frame, app);
         }
         return;
     }
@@ -116,6 +120,10 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
         confirmation(frame, app);
     } else if app.live.permission.is_some() {
         permission(frame, app);
+    } else if app.connect.is_some() {
+        connect(frame, app);
+    } else if app.model_picker.is_some() {
+        model_picker(frame, app);
     }
 }
 
@@ -137,25 +145,11 @@ fn editor(frame: &mut Frame, app: &mut App) {
     }
     let row = app.document.line_column().0;
     let column = app.document.display_column();
+    let width = usize::from(area.width).max(1);
     let height = usize::from(area.height);
-    if app.follow_editor {
-        if row < app.editor_scroll {
-            app.editor_scroll = row;
-        }
-        if row >= app.editor_scroll + height {
-            app.editor_scroll = row + 1 - height;
-        }
-        if column < app.editor_horizontal {
-            app.editor_horizontal = column;
-        }
-        if column >= app.editor_horizontal + usize::from(area.width) {
-            app.editor_horizontal = column + 1 - usize::from(area.width);
-        }
-    }
-    let line_count = app.document.text.bytes().filter(|b| *b == b'\n').count() + 1;
-    app.editor_scroll = app.editor_scroll.min(line_count.saturating_sub(1));
     let selection = app.document.selection();
-    let mut lines = vec![];
+    let mut lines: Vec<Line<'static>> = vec![];
+    let mut rows = vec![];
     let mut frontmatter = false;
     let mut fence = false;
     let mut offset = 0;
@@ -167,88 +161,111 @@ fn editor(frame: &mut Frame, app: &mut App) {
         if text.trim_start().starts_with("```") || text.trim_start().starts_with("~~~") {
             fence = !fence;
         }
-        if index >= app.editor_scroll && index < app.editor_scroll + height {
-            let heading = text.starts_with('#') && text.trim_start_matches('#').starts_with(' ');
-            let mut spans = vec![];
-            let mut display = 0;
-            let mut bold = false;
-            let mut italic = false;
-            let mut inline_code = false;
-            let graphemes = text.grapheme_indices(true).collect::<Vec<_>>();
-            let mut previous_star = false;
-            for (n, (byte, g)) in graphemes.iter().enumerate() {
-                let w = grapheme_width(g, display);
-                let start = display;
-                display += w;
-                if *g == "`" {
-                    inline_code = !inline_code;
-                }
-                if *g == "*" || *g == "_" {
-                    if !previous_star && graphemes.get(n + 1).is_some_and(|(_, next)| next == g) {
-                        bold = !bold;
-                        previous_star = true;
-                    } else if previous_star {
-                        previous_star = false;
-                    } else {
-                        italic = !italic;
-                    }
-                } else {
-                    previous_star = false;
-                }
-                let mut style = Style::default().fg(app.theme.fg);
-                if heading {
-                    style = style.fg(app.theme.accent).add_modifier(Modifier::BOLD);
-                } else if frontmatter || text == "---" {
-                    style = style.fg(app.theme.yellow);
-                } else if fence || inline_code {
-                    style = style.fg(app.theme.green);
-                } else {
-                    if bold {
-                        style = style.fg(app.theme.accent).add_modifier(Modifier::BOLD);
-                    }
-                    if italic {
-                        style = style.fg(app.theme.yellow).add_modifier(Modifier::ITALIC);
-                    }
-                }
-                if selection
-                    .as_ref()
-                    .is_some_and(|r| r.contains(&(offset + byte)))
-                {
-                    style = style.bg(app.theme.selection);
-                }
-                if display <= app.editor_horizontal
-                    || start >= app.editor_horizontal + usize::from(area.width)
-                {
-                    continue;
-                }
-                let left = start.max(app.editor_horizontal);
-                let right = display.min(app.editor_horizontal + usize::from(area.width));
-                let rendered = if *g == "\t" || left != start || right != display {
-                    " ".repeat(right.saturating_sub(left))
-                } else {
-                    safe(g)
-                };
-                spans.push(Span::styled(rendered, style));
+        let heading = text.starts_with('#') && text.trim_start_matches('#').starts_with(' ');
+        let mut spans = vec![];
+        let mut display = 0;
+        let mut segment_start = 0;
+        let mut segment_width = 0;
+        let mut bold = false;
+        let mut italic = false;
+        let mut inline_code = false;
+        let graphemes = text.grapheme_indices(true).collect::<Vec<_>>();
+        let mut previous_star = false;
+        for (n, (byte, g)) in graphemes.iter().enumerate() {
+            let w = grapheme_width(g, display);
+            if segment_width > 0 && segment_width + w > width {
+                lines.push(Line::from(std::mem::take(&mut spans)));
+                rows.push((index, segment_start));
+                segment_start = display;
+                segment_width = 0;
             }
-            lines.push(Line::from(spans));
+            if *g == "`" {
+                inline_code = !inline_code;
+            }
+            if *g == "*" || *g == "_" {
+                if !previous_star && graphemes.get(n + 1).is_some_and(|(_, next)| next == g) {
+                    bold = !bold;
+                    previous_star = true;
+                } else if previous_star {
+                    previous_star = false;
+                } else {
+                    italic = !italic;
+                }
+            } else {
+                previous_star = false;
+            }
+            let mut style = Style::default().fg(app.theme.fg);
+            if heading {
+                style = style.fg(app.theme.accent).add_modifier(Modifier::BOLD);
+            } else if frontmatter || text == "---" {
+                style = style.fg(app.theme.yellow);
+            } else if fence || inline_code {
+                style = style.fg(app.theme.green);
+            } else {
+                if bold {
+                    style = style.fg(app.theme.accent).add_modifier(Modifier::BOLD);
+                }
+                if italic {
+                    style = style.fg(app.theme.yellow).add_modifier(Modifier::ITALIC);
+                }
+            }
+            if selection
+                .as_ref()
+                .is_some_and(|range| range.contains(&(offset + byte)))
+            {
+                style = style.bg(app.theme.selection);
+            }
+            let rendered = if *g == "\t" { " ".repeat(w) } else { safe(g) };
+            spans.push(Span::styled(rendered, style));
+            display += w;
+            segment_width += w;
         }
+        lines.push(Line::from(spans));
+        rows.push((index, segment_start));
         offset += raw.len() + 1;
-        if index >= app.editor_scroll + height {
-            break;
+    }
+    let cursor_visual = rows
+        .iter()
+        .enumerate()
+        .filter(|(_, (logical, start))| *logical == row && *start <= column)
+        .map(|(visual, _)| visual)
+        .next_back()
+        .unwrap_or(0);
+    if app.follow_editor {
+        if cursor_visual < app.editor_scroll {
+            app.editor_scroll = cursor_visual;
+        } else if cursor_visual >= app.editor_scroll + height {
+            app.editor_scroll = cursor_visual + 1 - height;
         }
     }
-    frame.render_widget(Paragraph::new(lines), area);
+    app.editor_scroll = app
+        .editor_scroll
+        .min(lines.len().saturating_sub(height.max(1)));
+    let end = (app.editor_scroll + height).min(lines.len());
+    app.editor_view_rows = rows[app.editor_scroll..end].to_vec();
+    frame.render_widget(
+        Paragraph::new(
+            lines
+                .into_iter()
+                .skip(app.editor_scroll)
+                .take(height)
+                .collect::<Vec<_>>(),
+        ),
+        area,
+    );
+    let cursor_start = rows.get(cursor_visual).map_or(0, |(_, start)| *start);
+    let cursor_column = column
+        .saturating_sub(cursor_start)
+        .min(width.saturating_sub(1));
     if app.focus == Focus::Editor
         && app.pending.is_none()
         && app.live.permission.is_none()
-        && row >= app.editor_scroll
-        && row < app.editor_scroll + height
-        && column >= app.editor_horizontal
-        && column < app.editor_horizontal + usize::from(area.width)
+        && cursor_visual >= app.editor_scroll
+        && cursor_visual < app.editor_scroll + height
     {
         frame.set_cursor_position((
-            area.x + (column - app.editor_horizontal) as u16,
-            area.y + (row - app.editor_scroll) as u16,
+            area.x + cursor_column as u16,
+            area.y + (cursor_visual - app.editor_scroll) as u16,
         ));
     }
 }
@@ -259,36 +276,65 @@ fn review(frame: &mut Frame, app: &mut App) {
     };
     let mut lines = vec![Line::styled(
         if p.mock {
-            "MOCK PROPOSAL · A accept · R reject"
+            "MOCK PROPOSAL · ↑/↓ blocks · Space toggles · Enter applies · A all · R reject"
         } else if app.review_armed {
-            "AGENT PROPOSAL · A accept · R reject"
+            "AGENT PROPOSAL · ↑/↓ blocks · Space toggles · Enter applies · A all · R reject"
         } else {
             "AGENT PROPOSAL · Ctrl+R to review · Esc rejects"
         },
         Style::default().fg(app.theme.yellow),
     )];
-    let diff = TextDiff::from_lines(&p.original, &p.replacement);
-    for change in diff.iter_all_changes() {
-        let (prefix, color) = match change.tag() {
-            ChangeTag::Delete => ("-", app.theme.red),
-            ChangeTag::Insert => ("+", app.theme.green),
-            ChangeTag::Equal => (" ", app.theme.muted),
-        };
-        for line in wrapped(
-            &format!(
-                "{prefix}{}",
-                change.to_string().trim_end_matches(['\r', '\n'])
+    let mut active_line = 1;
+    for (index, hunk) in p.hunks.iter().enumerate() {
+        let active = index == p.active_hunk;
+        if active {
+            active_line = lines.len();
+        }
+        lines.push(Line::styled(
+            format!(
+                "{} [{}] Block {} of {}",
+                if active { ">" } else { " " },
+                if hunk.included { "x" } else { " " },
+                index + 1,
+                p.hunks.len()
             ),
-            usize::from(app.editor_area.width),
-        ) {
-            lines.push(Line::styled(line, Style::default().fg(color)));
+            Style::default()
+                .fg(if active {
+                    app.theme.accent
+                } else {
+                    app.theme.yellow
+                })
+                .add_modifier(if active {
+                    Modifier::BOLD
+                } else {
+                    Modifier::empty()
+                }),
+        ));
+        let diff = TextDiff::from_lines(&hunk.original, &hunk.replacement);
+        for change in diff.iter_all_changes() {
+            let (prefix, color) = match change.tag() {
+                ChangeTag::Delete => ("-", app.theme.red),
+                ChangeTag::Insert => ("+", app.theme.green),
+                ChangeTag::Equal => (" ", app.theme.muted),
+            };
+            for line in wrapped(
+                &format!(
+                    "{prefix}{}",
+                    change.to_string().trim_end_matches(['\r', '\n'])
+                ),
+                usize::from(app.editor_area.width),
+            ) {
+                lines.push(Line::styled(line, Style::default().fg(color)));
+            }
         }
     }
-    app.editor_scroll = app.editor_scroll.min(
-        lines
-            .len()
-            .saturating_sub(usize::from(app.editor_area.height)),
-    );
+    let height = usize::from(app.editor_area.height).max(1);
+    if active_line < app.editor_scroll {
+        app.editor_scroll = active_line;
+    } else if active_line >= app.editor_scroll + height {
+        app.editor_scroll = active_line + 1 - height;
+    }
+    app.editor_scroll = app.editor_scroll.min(lines.len().saturating_sub(height));
     frame.render_widget(
         Paragraph::new(
             lines
@@ -301,11 +347,23 @@ fn review(frame: &mut Frame, app: &mut App) {
 }
 
 fn chat(frame: &mut Frame, app: &mut App) {
+    let activity = app
+        .activity_label()
+        .map(|label| {
+            const FRAMES: [&str; 4] = ["⠋", "⠙", "⠹", "⠸"];
+            format!(
+                " · {label} {} · Esc cancels",
+                FRAMES[app.animation_frame % FRAMES.len()]
+            )
+        })
+        .unwrap_or_default();
     let block = pane(
         &format!(
-            " Chat · {} · {} ",
+            " Chat · {} · {} · {}{} ",
             safe(&app.agents[app.agent].name),
-            app.backend_label()
+            app.agent_mode().label(),
+            app.backend_label(),
+            activity
         ),
         app.focus == Focus::Chat,
         app,
@@ -345,7 +403,9 @@ fn chat(frame: &mut Frame, app: &mut App) {
         Paragraph::new(lines.into_iter().skip(app.chat_scroll).collect::<Vec<_>>()),
         areas[0],
     );
-    let preview = if let Some(a) = &app.attachment {
+    let preview = if let Some(label) = app.selection_label() {
+        label
+    } else if let Some(a) = &app.attachment {
         format!(
             "Context: {} · {} bytes{}",
             a.label,
@@ -356,8 +416,6 @@ fn chat(frame: &mut Frame, app: &mut App) {
                 ""
             }
         )
-    } else if app.document.selection().is_some() {
-        "Selection available · /attach to pin context".into()
     } else {
         "Enter submits · Ctrl+J newline · Tab focus".into()
     };
@@ -524,6 +582,258 @@ fn permission(frame: &mut Frame, app: &App) {
     );
 }
 
+fn connect(frame: &mut Frame, app: &mut App) {
+    use crate::app::{CONNECT_CREDENTIAL_NAMES, CONNECT_PROVIDER_NAMES, ConnectStep};
+    let Some(wizard) = &app.connect else {
+        return;
+    };
+    let area = frame.area();
+    let w = area.width.min(78);
+    let h = area.height.min(12);
+    let popup = Rect::new(
+        area.x + (area.width - w) / 2,
+        area.y + (area.height - h) / 2,
+        w,
+        h,
+    );
+    app.connect_choice_area = Rect::default();
+    if matches!(wizard.step, ConnectStep::Provider) {
+        let mut lines = vec![Line::from(
+            "↑/↓ select · Enter choose · click a provider · Esc cancel",
+        )];
+        lines.push(Line::default());
+        lines.extend(
+            CONNECT_PROVIDER_NAMES
+                .iter()
+                .enumerate()
+                .map(|(index, provider)| {
+                    Line::styled(
+                        format!(
+                            "{} {}",
+                            if index == wizard.provider_selected {
+                                ">"
+                            } else {
+                                " "
+                            },
+                            provider
+                        ),
+                        Style::default().fg(if index == wizard.provider_selected {
+                            app.theme.accent
+                        } else {
+                            app.theme.fg
+                        }),
+                    )
+                }),
+        );
+        app.connect_choice_area = Rect::new(
+            popup.x.saturating_add(1),
+            popup.y.saturating_add(3),
+            popup.width.saturating_sub(2),
+            CONNECT_PROVIDER_NAMES.len() as u16,
+        );
+        frame.render_widget(Clear, popup);
+        frame.render_widget(
+            Paragraph::new(lines)
+                .block(
+                    Block::default()
+                        .borders(Borders::ALL)
+                        .title(" Connect provider "),
+                )
+                .style(Style::default().bg(app.theme.bg).fg(app.theme.fg)),
+            popup,
+        );
+        return;
+    }
+    if matches!(wizard.step, ConnectStep::Credential) {
+        let mut lines = vec![Line::from(
+            "↑/↓ select · Enter choose · click a source · Esc cancel",
+        )];
+        lines.push(Line::default());
+        lines.extend(
+            CONNECT_CREDENTIAL_NAMES
+                .iter()
+                .enumerate()
+                .map(|(index, source)| {
+                    Line::styled(
+                        format!(
+                            "{} {}",
+                            if index == wizard.credential_selected {
+                                ">"
+                            } else {
+                                " "
+                            },
+                            source
+                        ),
+                        Style::default().fg(if index == wizard.credential_selected {
+                            app.theme.accent
+                        } else {
+                            app.theme.fg
+                        }),
+                    )
+                }),
+        );
+        lines.push(Line::default());
+        lines.push(Line::styled(
+            "Native local Ollama can be used without a key",
+            Style::default().fg(app.theme.muted),
+        ));
+        app.connect_choice_area = Rect::new(
+            popup.x.saturating_add(1),
+            popup.y.saturating_add(3),
+            popup.width.saturating_sub(2),
+            CONNECT_CREDENTIAL_NAMES.len() as u16,
+        );
+        frame.render_widget(Clear, popup);
+        frame.render_widget(
+            Paragraph::new(lines)
+                .block(
+                    Block::default()
+                        .borders(Borders::ALL)
+                        .title(" Credential source "),
+                )
+                .style(Style::default().bg(app.theme.bg).fg(app.theme.fg)),
+            popup,
+        );
+        return;
+    }
+    let (title, instructions, value, secret) = match wizard.step {
+        ConnectStep::Provider => unreachable!(),
+        ConnectStep::Id => (
+            " Provider ID ",
+            "Short ID used in models, e.g. company · Enter: next",
+            wizard.input.clone(),
+            false,
+        ),
+        ConnectStep::Name => (
+            " Provider name ",
+            "Display name · Enter: next",
+            wizard.input.clone(),
+            false,
+        ),
+        ConnectStep::Endpoint => (
+            " Base URL ",
+            "HTTPS URL including /v1 when required; loopback HTTP allowed",
+            wizard.input.clone(),
+            false,
+        ),
+        ConnectStep::Credential => unreachable!(),
+        ConnectStep::Env => (
+            " Environment credential ",
+            "Variable name, e.g. OPENAI_API_KEY · Enter: connect",
+            wizard.input.clone(),
+            false,
+        ),
+        ConnectStep::SecretKeyring => (
+            " API key → OS keyring ",
+            "Type or terminal-paste key; it stays masked and out of config.yaml · Enter: connect",
+            wizard.secret.clone(),
+            true,
+        ),
+        ConnectStep::SecretFile => (
+            " API key → credentials.yaml ",
+            "Type or terminal-paste key; private plaintext mode 0600 on Unix · Enter: connect",
+            wizard.secret.clone(),
+            true,
+        ),
+        ConnectStep::PlaintextConfirm => (
+            " Plaintext credential warning ",
+            "The key will be stored unencrypted in private credentials.yaml.\nY: continue · N: choose another source",
+            String::new(),
+            false,
+        ),
+    };
+    let shown = if secret {
+        "•".repeat(value.chars().count())
+    } else {
+        safe(&value)
+    };
+    frame.render_widget(Clear, popup);
+    frame.render_widget(
+        Paragraph::new(instructions)
+            .wrap(ratatui::widgets::Wrap { trim: false })
+            .block(Block::default().borders(Borders::ALL).title(title))
+            .style(Style::default().bg(app.theme.bg).fg(app.theme.fg)),
+        popup,
+    );
+    if matches!(
+        wizard.step,
+        ConnectStep::Id
+            | ConnectStep::Name
+            | ConnectStep::Endpoint
+            | ConnectStep::Env
+            | ConnectStep::SecretKeyring
+            | ConnectStep::SecretFile
+    ) {
+        let field_width = popup.width.saturating_sub(2);
+        let shown_width = display_width(&shown);
+        let scroll = shown_width.saturating_sub(usize::from(field_width.saturating_sub(1)));
+        let displayed = crop(&shown, scroll, usize::from(field_width));
+        let field = Rect::new(
+            popup.x.saturating_add(1),
+            popup.bottom().saturating_sub(2),
+            field_width,
+            1,
+        );
+        frame.render_widget(
+            Paragraph::new(displayed).style(Style::default().bg(app.theme.bg).fg(app.theme.fg)),
+            field,
+        );
+        frame.set_cursor_position((
+            field.x.saturating_add((shown_width - scroll) as u16),
+            field.y,
+        ));
+    }
+}
+
+fn model_picker(frame: &mut Frame, app: &App) {
+    let Some(picker) = &app.model_picker else {
+        return;
+    };
+    let area = frame.area();
+    let w = area.width.min(78);
+    let h = area.height.min(18);
+    let popup = Rect::new(
+        area.x + (area.width - w) / 2,
+        area.y + (area.height - h) / 2,
+        w,
+        h,
+    );
+    let visible = usize::from(h.saturating_sub(2));
+    let start = picker.selected.saturating_sub(visible.saturating_sub(1));
+    let lines = picker
+        .models
+        .iter()
+        .enumerate()
+        .skip(start)
+        .take(visible)
+        .map(|(index, model)| {
+            Line::styled(
+                format!(
+                    "{} {}",
+                    if index == picker.selected { ">" } else { " " },
+                    safe(model)
+                ),
+                Style::default().fg(if index == picker.selected {
+                    app.theme.accent
+                } else {
+                    app.theme.fg
+                }),
+            )
+        })
+        .collect::<Vec<_>>();
+    frame.render_widget(Clear, popup);
+    frame.render_widget(
+        Paragraph::new(lines)
+            .block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .title(" Models · Enter select · Esc close "),
+            )
+            .style(Style::default().bg(app.theme.bg)),
+        popup,
+    );
+}
+
 fn safe(text: &str) -> String {
     text.chars()
         .map(|c| {
@@ -608,6 +918,28 @@ mod tests {
         app.compose_insert(&"界".repeat(100));
         let mut terminal = Terminal::new(TestBackend::new(80, 30)).unwrap();
         terminal.draw(|f| draw(f, &mut app)).unwrap();
+    }
+    #[test]
+    fn long_editor_lines_soft_wrap_without_changing_text() {
+        let mut app = App::new(None).unwrap();
+        let text = format!("{}界{}", "a".repeat(70), "b".repeat(70));
+        app.document.insert(&text);
+        let mut terminal = Terminal::new(TestBackend::new(80, 30)).unwrap();
+        terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+
+        assert_eq!(app.document.text, text);
+        assert!(
+            app.editor_view_rows
+                .iter()
+                .filter(|(line, _)| *line == 0)
+                .count()
+                > 1
+        );
+        assert!(
+            app.editor_view_rows
+                .windows(2)
+                .all(|rows| rows[0].0 != rows[1].0 || rows[0].1 < rows[1].1)
+        );
     }
     #[test]
     fn renders_review_and_confirmation() {

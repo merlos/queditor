@@ -108,6 +108,7 @@ fn main() -> Result<()> {
     }));
     terminal.draw(|frame| ui::draw(frame, &mut app))?;
     let mut checkpoint = std::time::Instant::now();
+    let mut animation = std::time::Instant::now();
     let mut state_changed = false;
     let mut preserve_recovery = false;
     while !app.quit {
@@ -119,6 +120,11 @@ fn main() -> Result<()> {
             break;
         }
         let mut redraw = app.poll_live();
+        if app.busy() && animation.elapsed() >= Duration::from_millis(100) {
+            app.animation_frame = app.animation_frame.wrapping_add(1);
+            animation = std::time::Instant::now();
+            redraw = true;
+        }
         if redraw {
             state_changed = true;
         }

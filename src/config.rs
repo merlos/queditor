@@ -1,17 +1,22 @@
 use anyhow::{Context, Result, bail};
 use ratatui::style::Color;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::{collections::BTreeMap, path::PathBuf};
 
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct Config {
     pub schema_version: u32,
     pub theme: String,
     pub keybindings: String,
+    /// Stable display name of the last selected built-in or custom agent.
+    pub agent: String,
+    /// Last operating mode selected for each agent name.
+    pub agent_modes: BTreeMap<String, AgentMode>,
     /// `mock` or a genai model identifier (prefer explicit provider namespaces).
     pub model: String,
     pub models: Vec<String>,
+    pub providers: BTreeMap<String, Provider>,
     pub persist_sessions: bool,
     pub recovery: bool,
 }
@@ -21,12 +26,23 @@ impl Default for Config {
             schema_version: 1,
             theme: "mocha".into(),
             keybindings: "vscode".into(),
+            agent: "Planner".into(),
+            agent_modes: BTreeMap::new(),
             model: "mock".into(),
             models: vec!["mock".into()],
+            providers: BTreeMap::new(),
             persist_sessions: false,
             recovery: true,
         }
     }
+}
+
+#[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum AgentMode {
+    #[default]
+    Chat,
+    Agent,
 }
 impl Config {
     pub fn load() -> Result<Self> {
@@ -43,12 +59,152 @@ impl Config {
         if !matches!(c.theme.as_str(), "mocha" | "daylight") {
             bail!("Unknown theme; use mocha or daylight");
         }
-        validate_model(&c.model)?;
+        if c.agent.trim().is_empty() || c.agent.len() > 200 || c.agent.chars().any(char::is_control)
+        {
+            bail!("Invalid agent name");
+        }
+        c.validate_model_ref(&c.model)?;
         for model in &c.models {
-            validate_model(model)?;
+            c.validate_model_ref(model)?;
+        }
+        for (id, provider) in &c.providers {
+            validate_provider(id, provider)?;
         }
         Ok(c)
     }
+
+    pub fn validate_model_ref(&self, model: &str) -> Result<()> {
+        if let Some((provider, name)) = model.split_once("::")
+            && self.providers.contains_key(provider)
+        {
+            return validate_provider_model(name);
+        }
+        validate_model(model)
+    }
+
+    pub fn save(&self) -> Result<()> {
+        let directory = config_dir();
+        std::fs::create_dir_all(&directory)?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&directory, std::fs::Permissions::from_mode(0o700))?;
+        }
+        let path = directory.join("config.yaml");
+        if path.exists() && std::fs::symlink_metadata(&path)?.file_type().is_symlink() {
+            bail!("Config symlinks are not supported");
+        }
+        let bytes = serde_yaml_ng::to_string(self)?;
+        let mut temporary = tempfile::NamedTempFile::new_in(&directory)?;
+        use std::io::Write;
+        #[cfg(unix)]
+        use std::os::unix::fs::PermissionsExt;
+        #[cfg(unix)]
+        temporary
+            .as_file()
+            .set_permissions(std::fs::Permissions::from_mode(0o600))?;
+        temporary.write_all(bytes.as_bytes())?;
+        temporary.as_file().sync_all()?;
+        temporary.persist(path).map_err(|e| e.error)?;
+        Ok(())
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct Provider {
+    #[serde(default)]
+    pub name: String,
+    #[serde(default = "openai_compatible")]
+    pub protocol: String,
+    pub base_url: String,
+    #[serde(default)]
+    pub credential: Credential,
+    #[serde(default)]
+    pub models: Vec<String>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct Credential {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub env: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub keyring: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub file: Option<String>,
+}
+
+fn openai_compatible() -> String {
+    "openai_compatible".into()
+}
+
+fn validate_provider(id: &str, provider: &Provider) -> Result<()> {
+    if id.is_empty()
+        || id.len() > 64
+        || !id
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_'))
+    {
+        bail!("Invalid provider ID: {id}");
+    }
+    if !matches!(
+        provider.protocol.as_str(),
+        "openai" | "openai_compatible" | "anthropic" | "gemini" | "openrouter"
+    ) {
+        bail!("Provider {id} uses an unsupported protocol");
+    }
+    crate::provider::normalize_endpoint(&provider.base_url)?;
+    for model in &provider.models {
+        validate_provider_model(model)?;
+    }
+    let credential_sources = [
+        provider.credential.env.is_some(),
+        provider.credential.keyring.is_some(),
+        provider.credential.file.is_some(),
+    ]
+    .into_iter()
+    .filter(|set| *set)
+    .count();
+    if credential_sources != 1 {
+        bail!("Provider {id} must configure exactly one credential source");
+    }
+    if let Some(env) = &provider.credential.env
+        && (env.is_empty()
+            || !env
+                .chars()
+                .all(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || c == '_'))
+    {
+        bail!("Provider {id} has an invalid environment variable name");
+    }
+    for name in [
+        provider.credential.keyring.as_deref(),
+        provider.credential.file.as_deref(),
+    ]
+    .into_iter()
+    .flatten()
+    {
+        if name.is_empty()
+            || name.len() > 64
+            || !name
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_'))
+        {
+            bail!("Provider {id} has an invalid credential reference");
+        }
+    }
+    Ok(())
+}
+
+pub fn validate_provider_model(model: &str) -> Result<()> {
+    if model.trim().is_empty()
+        || model.len() > 200
+        || model.chars().any(char::is_whitespace)
+        || model.contains("::")
+    {
+        bail!("Invalid provider model identifier");
+    }
+    Ok(())
 }
 pub fn validate_model(model: &str) -> Result<()> {
     if model.trim().is_empty() || model.len() > 200 || model.chars().any(char::is_whitespace) {
@@ -114,6 +270,7 @@ impl Bindings {
                 ("ctrl+n", "down"),
                 ("ctrl+a", "home"),
                 ("ctrl+e", "end"),
+                ("ctrl+k", "kill_line"),
                 ("ctrl+d", "delete"),
                 ("ctrl+h", "backspace"),
                 ("ctrl+space", "mark"),
@@ -124,7 +281,9 @@ impl Bindings {
             ]
         } else {
             vec![
-                ("ctrl+a", "select_all"),
+                ("ctrl+a", "home"),
+                ("ctrl+e", "end"),
+                ("ctrl+k", "kill_line"),
                 ("ctrl+c", "copy"),
                 ("ctrl+x", "cut"),
                 ("ctrl+v", "paste"),
@@ -160,6 +319,7 @@ impl Bindings {
                         | "end"
                         | "delete"
                         | "backspace"
+                        | "kill_line"
                         | "mark"
                         | "select_all"
                         | "cut"
@@ -224,6 +384,7 @@ mod tests {
     fn partial_config_uses_defaults() {
         let c: Config = serde_yaml_ng::from_str("theme: daylight").unwrap();
         assert_eq!(c.keybindings, "vscode");
+        assert_eq!(c.agent, "Planner");
         assert_eq!(c.schema_version, 1);
     }
     #[test]

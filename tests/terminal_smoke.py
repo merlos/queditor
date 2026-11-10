@@ -160,9 +160,35 @@ class SmokeTests(unittest.TestCase):
             app.finish()
             self.assertEqual(doc.read_text(), "")
 
+    def test_selected_agent_and_model_are_restored_after_restart(self):
+        with tempfile.TemporaryDirectory(prefix="queditor-preferences-") as directory:
+            root = Path(directory)
+            doc = root / "draft.md"
+            doc.write_text("")
+            config = root / "config"
+            app = TerminalApp(doc, config)
+            self.addCleanup(app.close)
+            app.send(b"\t\x1b[Z", b"Blogger")
+            app.send(b"/mode agent\r", b"AGENT mode selected")
+            app.send(b"/models ollama::remembered\r", b"Model selected and remembered")
+            saved = (config / "queditor/config.yaml").read_text()
+            self.assertIn("agent: Blogger", saved)
+            self.assertIn("Blogger: agent", saved)
+            self.assertIn("model: ollama::remembered", saved)
+            app.send(b"\x11")
+            app.finish()
+
+            restarted = TerminalApp(doc, config, backend=b"ollama::remembered")
+            self.addCleanup(restarted.close)
+            restarted.wait_for(b"Blogger")
+            restarted.wait_for(b"AGENT")
+            restarted.wait_for(b"ollama::remembered")
+            restarted.send(b"\x11")
+            restarted.finish()
+
 
 class FakeProvider:
-    """Exercises genai's real HTTP/SSE adapter against a local, credential-free server."""
+    """Exercises genai's real HTTP/SSE adapter against a local fixture server."""
 
     def __init__(self, read_path, deny=False):
         self.requests = []
@@ -200,6 +226,17 @@ class FakeProvider:
                 self.wfile.write(b"data: [DONE]\n\n")
                 self.wfile.flush()
 
+            def do_GET(self):
+                if self.path == "/v1/models":
+                    self.send_response(200)
+                    self.send_header("Content-Type", "application/json")
+                    self.send_header("Connection", "close")
+                    self.end_headers()
+                    self.wfile.write(json.dumps({"object": "list", "data": [{"id": "test", "object": "model"}]}).encode())
+                else:
+                    self.send_response(404)
+                    self.end_headers()
+
         self.server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
         self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
         self.thread.start()
@@ -212,6 +249,70 @@ class FakeProvider:
 
 
 class LiveSmokeTests(unittest.TestCase):
+    def test_current_selection_is_sent_automatically_with_line_label(self):
+        with tempfile.TemporaryDirectory(prefix="queditor-selection-") as directory:
+            root = Path(directory)
+            doc = root / "draft.md"
+            doc.write_text("one\ntwo\nthree")
+            config = root / "config"
+            (config / "queditor").mkdir(parents=True)
+            (config / "queditor/config.yaml").write_text("model: genai_1::test\n")
+            provider = FakeProvider(root / "unused", deny=True)
+            self.addCleanup(provider.close)
+            app = TerminalApp(
+                doc,
+                config,
+                extra_env={
+                    "GENAI_1_ENDPOINT": provider.endpoint,
+                    "GENAI_1_API_KEY": "local-test-placeholder",
+                },
+                backend=b"GENAI",
+            )
+            self.addCleanup(app.close)
+            app.send(b"\x1b[1;2F", b"Selected line 1")
+            app.send(b"\thelp me\r", b"Agent finished")
+            request = json.dumps(provider.requests[0])
+            self.assertIn("Selected line 1", request)
+            self.assertIn('\\"text\\":\\"one\\"', request)
+            self.assertNotIn("two\\nthree", request)
+            self.assertNotIn("propose_edit", [tool["function"]["name"] for tool in provider.requests[0].get("tools", [])])
+            app.send(b"\x11")
+            app.finish()
+
+    def test_connect_custom_endpoint_discovers_model_without_config_secret(self):
+        with tempfile.TemporaryDirectory(prefix="queditor-connect-") as directory:
+            root = Path(directory)
+            doc = root / "draft.md"
+            doc.write_text("")
+            config = root / "config"
+            provider = FakeProvider(root / "unused")
+            self.addCleanup(provider.close)
+            app = TerminalApp(doc, config, extra_env={"COMPANY_API_KEY": "local-test-key"})
+            self.addCleanup(app.close)
+            app.send(b"\t/connect\r", b"Connect provider")
+            app.send(b"c", b"Provider ID")
+            app.send(b"company\r", b"Provider name")
+            app.send(b"Company Gateway\r", b"Base URL")
+            app.send(provider.endpoint.encode() + b"\r", b"Credential source")
+            app.send(b"e", b"Environment credential")
+            app.send(b"COMPANY_API_KEY\r", b"Models")
+            app.send(b"\x1b[B\r", b"company::test")
+            saved = (config / "queditor/config.yaml").read_text()
+            self.assertIn("base_url: " + provider.endpoint, saved)
+            self.assertIn("env: COMPANY_API_KEY", saved)
+            self.assertNotIn("local-test-key", saved)
+            app.send(b"hello\r", b"Agent finished")
+            self.assertEqual(len(provider.requests), 3)
+            self.assertEqual(
+                [
+                    request["messages"][-1].get("tool_call_id")
+                    for request in provider.requests[1:]
+                ],
+                ["call-1", "call-2"],
+            )
+            app.send(b"\x11")
+            app.finish()
+
     def test_compaction_rejects_undeclared_tool_calls(self):
         with tempfile.TemporaryDirectory(prefix="queditor-compact-") as directory:
             root = Path(directory)
@@ -273,7 +374,7 @@ class LiveSmokeTests(unittest.TestCase):
             self.assertEqual(len(records), 1)
             self.assertEqual(json.loads(records[0].read_text())["document"]["text"], "signal-safe text")
 
-    def test_permission_tool_loop_and_review_never_send_unattached_text(self):
+    def test_agent_mode_sends_full_document_and_requires_review(self):
         with tempfile.TemporaryDirectory(prefix="queditor-live-") as directory:
             root = Path(directory)
             doc = root / "draft.md"
@@ -288,19 +389,21 @@ class LiveSmokeTests(unittest.TestCase):
             app = TerminalApp(doc, config, extra_env={"GENAI_1_ENDPOINT": provider.endpoint, "GENAI_1_API_KEY": "local-test-placeholder"}, backend=b"GENAI")
             self.addCleanup(app.close)
             app.send(b"\x1b[1;2C" * 5 + b"\t/attach\r", b"Context snapshot attached")
+            app.send(b"/mode agent\r", b"AGENT mode selected")
             app.send(b"revise\r", b"Agent file permission")
             self.assertEqual(len(provider.requests), 1)
             self.assertNotIn("approved tool context", json.dumps(provider.requests))
             app.send(b"o", b"AGENT PROPOSAL")
             self.assertEqual(doc.read_text(), "helloUNATTACHED_SECRET")
-            self.assertNotIn("UNATTACHED_SECRET", json.dumps(provider.requests))
+            self.assertIn("UNATTACHED_SECRET", json.dumps(provider.requests))
+            self.assertIn("propose_edit", [tool["function"]["name"] for tool in provider.requests[0].get("tools", [])])
             self.assertIn("approved tool context", json.dumps(provider.requests))
             app.send(b"\x12", b"Review enabled")
             app.send(b"a", b"Proposal accepted")
             app.send(b"\x13", b"Saved")
             app.send(b"\x11")
             app.finish()
-            self.assertEqual(doc.read_text(), "HELLOUNATTACHED_SECRET")
+            self.assertEqual(doc.read_text(), "HELLO")
 
     def test_denied_read_never_reaches_provider(self):
         with tempfile.TemporaryDirectory(prefix="queditor-live-") as directory:

@@ -99,6 +99,29 @@ impl Document {
         self.selection().map(|r| &self.text[r])
     }
 
+    /// One-based inclusive line range covered by the current selection.
+    pub fn selected_lines(&self) -> Option<std::ops::RangeInclusive<usize>> {
+        let range = self.selection()?;
+        let bytes = self.text.as_bytes();
+        let start = bytes[..range.start]
+            .iter()
+            .filter(|byte| **byte == b'\n')
+            .count()
+            + 1;
+        // A trailing newline belongs to the line it terminates, not the next line.
+        let end_offset = if bytes.get(range.end.saturating_sub(1)) == Some(&b'\n') {
+            range.end.saturating_sub(1)
+        } else {
+            range.end
+        };
+        let end = bytes[..end_offset]
+            .iter()
+            .filter(|byte| **byte == b'\n')
+            .count()
+            + 1;
+        Some(start..=end)
+    }
+
     fn snapshot(&self) -> Snapshot {
         Snapshot {
             text: self.text.clone(),
@@ -152,6 +175,19 @@ impl Document {
             self.replace(r, "");
         } else if self.cursor < self.text.len() {
             self.replace(self.cursor..next(&self.text, self.cursor), "");
+        }
+    }
+
+    /// Delete the active selection, or from the cursor to the end of the current line.
+    pub fn kill_line(&mut self) {
+        if let Some(range) = self.selection() {
+            self.replace(range, "");
+            return;
+        }
+        let row = self.line_column().0;
+        let end = self.line_start(row) + self.line(row).len();
+        if self.cursor < end {
+            self.replace(self.cursor..end, "");
         }
     }
 
@@ -435,6 +471,38 @@ mod tests {
         d.undo();
         d.undo();
         assert!(!d.dirty());
+    }
+
+    #[test]
+    fn selected_lines_are_one_based_inclusive() {
+        let mut d = Document::default();
+        d.insert("one\ntwo\nthree");
+        d.move_to(0, false);
+        d.move_to(7, true);
+        assert_eq!(d.selected_text(), Some("one\ntwo"));
+        assert_eq!(d.selected_lines(), Some(1..=2));
+
+        d.move_to(0, false);
+        d.move_to(4, true);
+        assert_eq!(d.selected_text(), Some("one\n"));
+        assert_eq!(d.selected_lines(), Some(1..=1));
+    }
+
+    #[test]
+    fn kill_line_is_undoable_and_preserves_newline() {
+        let mut d = Document::default();
+        d.insert("one two\nthree");
+        d.move_to(4, false);
+        d.kill_line();
+        assert_eq!(d.text, "one \nthree");
+        assert_eq!(d.cursor, 4);
+        d.undo();
+        assert_eq!(d.text, "one two\nthree");
+
+        d.move_to(4, false);
+        d.move_to(7, true);
+        d.kill_line();
+        assert_eq!(d.text, "one \nthree");
     }
     #[test]
     fn preserves_crlf_and_final_newline() {

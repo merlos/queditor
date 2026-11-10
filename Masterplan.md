@@ -22,6 +22,8 @@ The implementation uses substantive modules instead of empty placeholder folders
 It uses `String` plus bounded snapshots rather than a rope; measure large-file
 latency before switching storage. `backend` runs genai streaming and tool rounds
 on Tokio, communicating through bounded channels with `live` orchestration.
+`provider` validates endpoint profiles and creates exact genai targets; `credentials`
+resolves environment, OS-keyring, and private-file references without exposing keys.
 `tools` prepares anchored filesystem capabilities before permission waits, without
 reading text. `storage` handles private recovery/session/grant records outside the
 renderer. Never call providers inside rendering or synchronous key handling.
@@ -31,11 +33,12 @@ renderer. Never call providers inside rendering or synchronous key handling.
 1. Editing offsets are UTF-8 grapheme boundaries.
 2. Dirty state compares content to the saved baseline, not just a boolean toggle.
 3. Attachments capture exact text and document revision.
-4. Proposals hold original text, range, revision, and replacement separately.
-5. Acceptance validates revision/original and creates one undoable edit.
+4. Agent-mode proposals hold a complete document snapshot plus line-based diff blocks.
+5. Whole or partial acceptance validates revision/original and creates one undoable edit.
 6. Save operates only on accepted text and checks external disk changes.
 7. Dirty open/quit operations require explicit confirmation.
-8. Mock mode makes no network calls; live mode sends explicit context and approved tool results only.
+8. Mock mode makes no network calls; Chat mode sends explicit context, while Agent
+   mode deliberately sends the open document snapshot plus approved tool results.
 9. File permissions are local/exact-path and cannot be overridden by agent prompts.
 10. Partial/cancelled/failed turns never stage generated edits or commit model-facing history.
 11. Recovery never writes the original document; session-content persistence is opt-in.
@@ -77,10 +80,10 @@ have now been added. Argument completion and broader chat-interaction parity rem
 
 ### 5. Safe edit review — local workflow implemented
 
-Deterministic proposals, colored diff, whole-proposal accept/reject, undo,
-stale revision rejection, and save exclusion. Pending proposals are modal in this
-build. Live generation allows concurrent editing and rejects stale results.
-Per-hunk acceptance remains future work.
+Deterministic proposals, colored diff blocks, per-block inclusion, whole-proposal
+accept/reject, atomic undo, stale revision rejection, and save exclusion are
+implemented. Pending proposals are modal. Live generation allows concurrent editing
+and rejects stale results.
 
 ### 6. Live AI and permissions — core implementation delivered
 
@@ -88,19 +91,21 @@ Per-hunk acceptance remains future work.
 2. Move effects off the terminal event loop using Tokio and bounded queues.
 3. Add deterministic streaming/error/tool mocks and reconnection tests.
 4. Use genai for multiple native/provider-compatible protocols and environment credentials.
-5. Send selected agent instructions and explicitly attached context only.
-6. Define and validate structured `propose_edit` output against captured revisions.
+5. Give each agent a persisted read-only Chat mode and full-document Agent mode.
+6. Define and validate complete-document `propose_edit` output against captured revisions.
 7. Introduce read/list tools with canonical paths, symlink checks, size/text limits,
    sensitive-file exclusions and scoped permission prompts.
 8. Add allow-once/session/persistent/deny plus saved-grant review and revocation.
 9. Do not grant shell execution, deletion, or direct disk writes in the initial AI MVP.
-10. Add model selection, compaction, cancellation and sanitized provider failures.
+10. Add guided provider connection, endpoint-bound credentials, model discovery and
+    selection, compaction, cancellation and sanitized provider failures.
 
 The request/event contracts, Tokio jobs, bounded queues, structured proposal loop,
-permissions/grant revocation, tool capability limits, model selection and compaction
+permissions/grant revocation, tool capability limits, provider setup/model discovery,
+model selection and compaction
 are implemented. Local HTTP/SSE provider fixtures exercise the real genai adapter
 without credentials. Remaining: more provider-account testing, usage reporting,
-automatic reconnect semantics, granular grant revocation, and model discovery.
+automatic reconnect semantics and granular grant revocation.
 
 Gate: mock/provider tests prove agents cannot read unapproved files, silently send
 unattached document text, overwrite newer user edits, or write unaccepted proposals.

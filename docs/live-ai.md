@@ -7,10 +7,12 @@ and tool-call API supports native OpenAI, Anthropic, Gemini and Ollama protocols
 plus gateways and OpenAI-compatible services. Library support is not a guarantee
 that every model supports tools or every provider account has been tested.
 
-Mock mode remains the default. `/models` shows the current model and configured
-suggestions. `/models <provider::model>` selects a live model for this run;
+Mock mode remains the default. `/connect` provides guided provider setup and model
+discovery. `/models` opens a selector containing configured and discovered models.
+`/models <provider::model>` also selects and remembers a live model;
 `/models mock` returns to offline mode. Use a model available to your account.
-There is no automatic account-specific model discovery yet.
+Discovery uses the provider's model-list API and can fail even when manual model use
+works; in that case enter the documented model ID directly.
 
 Startup configuration example:
 
@@ -28,15 +30,28 @@ recovery: true
 
 ## Credentials and endpoints
 
-Set credentials in the environment inherited by `queditor`, using names documented
-by genai and your provider. Common names include `OPENAI_API_KEY`,
-`ANTHROPIC_API_KEY`, `GEMINI_API_KEY`, `GROQ_API_KEY`, and `OPEN_ROUTER_API_KEY`.
-Do not put key values in YAML or agent Markdown.
+Run `/connect` and choose OpenAI, Anthropic, Gemini, OpenRouter, or Custom
+OpenAI-compatible. Credential choices are the OS keyring, an environment-variable
+reference, or a private plaintext fallback. API-key input is masked and never enters
+chat, session, or recovery history.
+
+Environment credentials use names inherited by `queditor`. Common names include
+`OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `GEMINI_API_KEY`, `GROQ_API_KEY`, and
+`OPEN_ROUTER_API_KEY`.
+Do not put key values in `config.yaml` or agent Markdown. `/connect` stores only the
+environment-variable/keyring/file reference there. Keyring is preferred. The
+`credentials.yaml` fallback is mode 0600 on Unix but remains unencrypted plaintext.
 
 Local Ollama normally needs no key; install/start Ollama separately and download
 the desired model before selecting `ollama::<model-name>`.
 
-For a custom **OpenAI-compatible** endpoint, set `GENAI_1_ENDPOINT` to its base URL
+For a custom **OpenAI-compatible** endpoint, `/connect` asks for its base URL and
+discovers `GET <base>/models`; if unavailable, enter `/models <id>::<model>` manually.
+Remote endpoints require HTTPS; plain HTTP is limited to loopback. URLs containing
+credentials, queries, or fragments are rejected, and authenticated redirects are
+disabled to keep bearer keys on the configured origin.
+
+The older compatibility path remains available: set `GENAI_1_ENDPOINT` to its base URL
 (including `/v1/`, where appropriate) and `GENAI_1_API_KEY`. Then select
 `/models genai_1::<model-name>`. Different `genai_<number>` namespaces support
 multiple endpoints. Use HTTPS remotely; plain HTTP is only appropriate for trusted
@@ -45,7 +60,9 @@ The currently pinned genai 0.7.3 custom adapter requires a key value even for
 unauthenticated services: use a harmless placeholder only for a trusted local
 endpoint that ignores the Authorization header. Native local Ollama needs no key.
 
-API keys are never serialized by Queditor. Raw provider errors/bodies are suppressed
+API keys are never serialized in ordinary config, sessions, or recovery. A key is
+serialized only when the user explicitly selects the private plaintext fallback.
+Raw provider errors/bodies are suppressed
 because they can echo prompts or credentials; failures show safe categories. Check
 provider/account configuration independently when these diagnostics are insufficient.
 
@@ -55,12 +72,17 @@ A live prompt sends:
 
 - Selected agent instructions and workspace-path metadata.
 - Submitted prompt and committed live conversation history.
-- An explicitly pinned selection/document snapshot, when present.
+- In Chat mode, the current editor selection (automatically snapshotted) or an
+  explicitly pinned snapshot when no current selection exists.
+- In Agent mode, the complete open document; a selection or pinned snapshot is also
+  identified as especially important prompt context.
 - File/list results only after local permission approval.
 
-Selecting text alone does not send it. The full editor document is never attached
-implicitly. `/attach clear` removes the current attachment, not previously sent
-history. `/new` clears history for future requests; it cannot delete provider-side
+Selecting text marks it as important context and sends it with the next live prompt;
+the chat pane shows `Selected line X` for one line or the inclusive one-based range
+`Selected lines X:Y` for multiple lines. Agent mode additionally sends the full
+document so it can edit freely; Chat mode does not. `/attach clear` removes the pinned attachment, not a current
+selection or previously sent history. `/new` clears history for future requests; it cannot delete provider-side
 data. Switching providers sends committed history to the new provider on the next
 prompt. Start a new session if that would be inappropriate.
 
@@ -69,21 +91,28 @@ supported; this is not a universal no-retention guarantee.
 
 ## Edits, cancellation, and limits
 
-Only `propose_edit` can propose a replacement for the explicit editor snapshot.
-It never applies/saves changes. Queditor checks original text/revision again after
-successful turn completion. Missing context, stale revisions, failure, truncation,
-or cancellation never stage/apply generated edits. For live results, press Ctrl+R
-to enable acceptance before A/Enter; queued typing cannot accept an unseen proposal.
-saving remains separate.
+Every agent has a remembered mode. Chat mode is read-only and does not expose
+`propose_edit`; it can answer, critique, and describe suggested revisions. Agent
+mode exposes `propose_edit` for a complete replacement of the open document. It
+never directly applies or saves changes. Queditor checks original text/revision
+again after successful turn completion. Stale revisions, failure, truncation, or
+cancellation never stage/apply generated edits.
 
-`/cancel` or Ctrl+C in chat stops generation and drops pending tool/proposal events.
-Ctrl+C also cancels inside a permission dialog. Partial output remains visibly
+For live results, Ctrl+R opens review before acceptance keys are active, so queued
+typing cannot accept an unseen proposal. Up/Down navigates diff blocks, Space
+includes/excludes one, Enter applies included blocks, A applies all, and R/Escape
+rejects all. Partial choices are composed against the original snapshot and applied
+as one validated, undoable edit. Saving remains separate.
+
+Escape from either pane always stops active generation, streaming, tool execution,
+provider waits, or permission waits and drops pending tool/proposal events. `/cancel`
+and Ctrl+C in chat remain alternatives. Partial output remains visibly
 marked incomplete/cancelled and is not committed as model history. Cancellation
 cannot undo provider processing or earlier transmissions.
 
-Limits: 8 generation rounds, 12 tool calls, 256 KiB attachments/file reads/proposed
-replacements, 1000 directory entries, 1 MiB generated/tool context, 30-second
-header/stream-read waits, and a five-minute total deadline including permission
+Limits: 8 generation rounds, 12 tool calls, 256 KiB attachments/open documents/file
+reads/proposed replacements, 1000 directory entries, 1 MiB generated/tool context, 120-second
+header/stream-read waits, and a ten-minute total deadline including permission
 waits. No automatic retries, avoiding duplicate actions/billing.
 
 `/compact` summarizes committed history without tools, replacing model-facing

@@ -9,16 +9,50 @@ or modify home-directory configuration automatically.
 schema_version: 1
 theme: mocha           # mocha or daylight
 keybindings: vscode    # vscode, emacs, or a custom profile filename
+agent: Planner         # last selected built-in or custom agent
+agent_modes: {}        # remembered chat/agent mode by agent name
 model: mock            # or a genai provider::model identifier
 models: [mock]         # suggestions shown by /models
+providers: {}          # connections created by /connect
 persist_sessions: false
 recovery: true
 ```
 
 Missing fields inherit embedded defaults. Unknown fields, invalid themes, and
 unsupported schema versions warn and fall back to safe defaults. A bad binding
-profile falls back to vscode. Changes take effect on the next launch.
+profile falls back to vscode. Model, agent, and each agent's Chat/Agent mode are
+saved immediately and restored on the next launch; a removed custom agent falls
+back to Planner. Agents without a saved mode default to read-only Chat mode.
 `/theme daylight` changes the theme for the current run only.
+
+## Providers and credentials
+
+`/connect` writes non-secret provider metadata to `config.yaml`. A custom
+OpenAI-compatible connection can also be configured declaratively:
+
+```yaml
+model: company::coder
+providers:
+  company:
+    name: Company Gateway
+    protocol: openai_compatible
+    base_url: https://llm.example.com/v1/
+    credential:
+      env: COMPANY_LLM_API_KEY
+    models: [coder]
+```
+
+Exactly one credential source is required: `env`, `keyring`, or `file`. `env`
+contains the environment variable's **name**, not its value. For example,
+`env: OPENAI_API_KEY` resolves the
+current value when a request starts, so key rotation does not require a config edit.
+
+Never place a raw key in `config.yaml`. Keyring references are stored by the OS under
+the `queditor` service. File references point to an entry in `credentials.yaml` in
+the same configuration directory. That fallback is unencrypted plaintext, created
+atomically with mode 0600 on Unix; Queditor rejects a permissive or symlinked file.
+Use `/connect delete <provider-id>` to remove a provider and its keyring/file secret.
+Environment variables are never modified by Queditor.
 
 ## Editing bindings
 
@@ -41,16 +75,17 @@ reserved and cannot be overridden by editor bindings. Multi-key chords and
 chat-specific custom binding maps are not implemented.
 
 Available editor actions: `left`, `right`, `up`, `down`, `home`, `end`, `delete`,
-`backspace`, `mark`, `select_all`, `cut`, `copy`, `paste`, `undo`, `redo`, `none`.
+`backspace`, `kill_line`, `mark`, `select_all`, `cut`, `copy`, `paste`, `undo`,
+`redo`, `none`.
 Unknown actions reject the profile. `/keys` shows resolved bindings.
 
 ### Default profile subsets
 
-VS Code: Ctrl+A select all, Ctrl+C/X/V internal copy/cut/paste, Ctrl+Z undo,
-Ctrl+Y or Ctrl+Shift+Z redo.
+VS Code: Ctrl+A/E line start/end, Ctrl+K deletes from the cursor to line end,
+Ctrl+C/X/V internal copy/cut/paste, Ctrl+Z undo, Ctrl+Y or Ctrl+Shift+Z redo.
 
 Emacs: Ctrl+B/F character movement, Ctrl+P/N line movement, Ctrl+A/E line
-start/end, Ctrl+D delete, Ctrl+H backspace, Ctrl+Space mark, Ctrl+W cut,
+start/end, Ctrl+K delete to line end, Ctrl+D delete, Ctrl+H backspace, Ctrl+Space mark, Ctrl+W cut,
 Alt+W copy, Ctrl+Y paste, Ctrl+Z undo. Escape clears the mark. These are familiar
 editing subsets, not complete emulator/key-chord compatibility.
 

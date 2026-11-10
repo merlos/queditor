@@ -14,6 +14,8 @@ library. Never imply mock responses are live AI or every provider is account-tes
 - `src/document.rs`: Unicode-aware document operations, history, safe file handling.
 - `src/config.rs`: embedded defaults, YAML profiles, semantic theme colors.
 - `src/backend.rs`: genai streaming/tool loop, budgets, timeouts, sanitized errors.
+- `src/provider.rs`: validated provider endpoints, model discovery, exact genai targets.
+- `src/credentials.rs`: environment/keyring/private-file secret resolution and storage.
 - `src/live.rs`: async job lifecycle, snapshot validation, permission/state orchestration.
 - `src/tools.rs`: exact-path grants, sensitive exclusions, anchored file capabilities.
 - `src/storage.rs`: private versioned recovery/session/permission records.
@@ -38,7 +40,8 @@ they acquire real complexity; do not create empty placeholder hierarchies.
 - Network/provider integration must go behind a backend boundary and never block rendering.
 - Agent tools must enforce permissions locally, not through prompt instructions.
 - File capabilities must not read content before approval; keep them anchored across permission waits.
-- Only explicitly attached editor snapshots may be targets for live proposals.
+- Chat mode is read-only. Agent mode may target the complete open document snapshot;
+  current selections and pinned snapshots are important context, not edit boundaries.
 - Cancellation must discard generated proposals and prevent late events mutating a new session/document.
 - Live proposal acceptance requires an explicit review action before ordinary A/Enter keys.
 - Compaction must reject tool calls, even if a provider returns them without declared tools.

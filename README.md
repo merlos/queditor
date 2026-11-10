@@ -62,6 +62,7 @@ entering the UI. `queditor --help` shows CLI options.
 - `/files` browses files; `/open "a file.md"` opens/creates a document.
 - `/save "draft.md"` saves an unnamed document.
 - Select text in the editor, switch to chat, and use `/attach` to pin a snapshot.
+- Use `/mode chat` for read-only discussion or `/mode agent` for full-document staged edits.
 - `/demo` creates a deterministic uppercase proposal, not an AI response.
 - **A/Enter** accepts a proposal; **R/Esc** rejects it. **Ctrl+Z** undoes acceptance.
 - `/rewrite "replacement text"` previews a replacement for selection/context,
@@ -84,15 +85,23 @@ entering the UI. `queditor --help` shows CLI options.
 
 ## Enable live AI
 
-Provide your provider's API key through its documented environment variable,
-then select a model in chat, for example `/models openai::gpt-4o-mini`.
+Run `/connect`, choose OpenAI, Anthropic, Gemini, OpenRouter, or a custom
+OpenAI-compatible endpoint, and choose where Queditor should resolve the API key.
+Keys can remain in an environment variable, be saved in the OS keyring, or—with an
+explicit plaintext warning—be saved in private `credentials.yaml`. Queditor then
+discovers account models where the provider supports it and opens `/models`.
+
+You can still select or enter a model directly, for example
+`/models openai::gpt-4o-mini`.
 For local Ollama, use `/models ollama::llama3.2` (the model must be installed).
 Use a model available to your account; tool/stream support varies by model.
 
-Select editor text and `/attach`, then ask for a revision. The assistant can
-propose a replacement for that exact snapshot. Editing while it runs is allowed;
-stale results will not be applied. For live proposals, Ctrl+R enables acceptance,
-then A/Enter accepts. `/cancel` or Ctrl+C in chat cancels generation.
+Chat mode answers and suggests without staging changes. In Agent mode the model may
+propose a complete replacement for the open document; selections remain important
+context rather than edit boundaries. Editing while it runs is allowed and stale
+results are rejected. Live proposals require Ctrl+R, then diff blocks can be
+included individually or accepted together. Escape always cancels active agent
+work; `/cancel` and Ctrl+C in chat remain available.
 
 See [provider setup and privacy](docs/live-ai.md) for authentication, custom
 endpoints, permissions, sessions, and recovery details.
@@ -111,7 +120,7 @@ endpoints, permissions, sessions, and recovery details.
 - Atomic replacement does not guarantee preservation of hard links, ACLs, xattrs,
   or concurrent writes occurring after the final disk check.
 - Tool permissions are application-level controls, not an OS-wide sandbox.
-- Model lists are configuration suggestions, not provider-account discovery.
+- Model discovery depends on provider support; manual model entry remains available.
 - Provider-account compatibility and automatic reconnection/retry still need hardening.
 
 ## Documentation

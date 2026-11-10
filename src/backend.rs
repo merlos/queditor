@@ -1,6 +1,6 @@
 //! Provider-independent streaming/tool loop powered by genai. No terminal I/O here.
 use crate::tools::{self, MAX_CONTEXT_BYTES, Target};
-use anyhow::{Result, bail};
+use anyhow::{Context, Result, bail};
 use futures::StreamExt;
 use genai::{
     Client, WebConfig,
@@ -12,6 +12,7 @@ use tokio::sync::{mpsc, oneshot};
 
 pub struct Request {
     pub model: String,
+    pub provider: Option<crate::config::Provider>,
     pub system: String,
     pub history: Vec<ChatMessage>,
     pub workspace: PathBuf,
@@ -31,9 +32,15 @@ pub enum Event {
 }
 
 pub fn client() -> genai::Result<Client> {
-    Client::builder()
-        .with_web_config(WebConfig::default().with_connect_timeout(Duration::from_secs(15)))
-        .build()
+    let web = WebConfig::default().with_connect_timeout(Duration::from_secs(30));
+    let reqwest = reqwest::Client::builder().redirect(reqwest::redirect::Policy::none());
+    let reqwest =
+        web.apply_to_builder(reqwest)
+            .build()
+            .map_err(|error| genai::Error::ClientBuildFail {
+                cause: error.to_string(),
+            })?;
+    Client::builder().with_reqwest(reqwest).build()
 }
 
 pub fn definitions() -> Vec<Tool> {
@@ -42,7 +49,7 @@ pub fn definitions() -> Vec<Tool> {
             .with_schema(json!({"type":"object","properties":{"path":{"type":"string"}},"required":["path"],"additionalProperties":false})),
         Tool::new("list_directory").with_description("List a directory after user permission.")
             .with_schema(json!({"type":"object","properties":{"path":{"type":"string"}},"required":["path"],"additionalProperties":false})),
-        Tool::new("propose_edit").with_description("Propose replacement for the explicitly attached editor snapshot only. Never saves or applies changes.")
+        Tool::new("propose_edit").with_description("Propose a complete replacement for the open document snapshot. Never saves or applies changes; the user reviews the diff explicitly.")
             .with_schema(json!({"type":"object","properties":{"replacement":{"type":"string"}},"required":["replacement"],"additionalProperties":false})),
     ]
 }
@@ -51,24 +58,37 @@ pub fn definitions() -> Vec<Tool> {
 pub fn safe_error(error: &genai::Error) -> String {
     match error {
         genai::Error::HttpError { status, .. } => format!("Provider returned HTTP {status}; check credentials, model access, and rate limits"),
-        genai::Error::RequiresApiKey { .. } | genai::Error::NoAuthData { .. } | genai::Error::Resolver { .. } => "Provider authentication/resolution failed; check the provider's API-key environment variable".into(),
+        genai::Error::RequiresApiKey { .. } | genai::Error::NoAuthData { .. } | genai::Error::Resolver { .. } => "Provider authentication/resolution failed; check its configured environment, keyring, or private-file credential".into(),
         _ => "Provider request/stream failed; check model, endpoint, credentials, and network. Sensitive provider diagnostics are suppressed.".into(),
     }
 }
 
 pub async fn run(request: Request, sender: mpsc::Sender<Event>) {
     let result =
-        tokio::time::timeout(Duration::from_secs(300), conversation(request, &sender)).await;
+        tokio::time::timeout(Duration::from_secs(600), conversation(request, &sender)).await;
     let error = match result {
         Ok(Ok(())) => return,
         Ok(Err(e)) => e.to_string(),
-        Err(_) => "Agent request timed out after five minutes (including permission waits)".into(),
+        Err(_) => "Agent request timed out after ten minutes (including permission waits)".into(),
     };
     let _ = sender.send(Event::Failed(error)).await;
 }
 
 async fn conversation(request: Request, sender: &mpsc::Sender<Event>) -> Result<()> {
     let client = client().map_err(|e| anyhow::anyhow!(safe_error(&e)))?;
+    let target = if let Some(provider) = &request.provider {
+        let model = request
+            .model
+            .split_once("::")
+            .map(|(_, model)| model)
+            .context("Custom provider model is missing its namespace")?;
+        crate::provider::target(provider, model)?
+    } else {
+        client
+            .resolve_service_target(request.model.as_str())
+            .await
+            .map_err(|e| anyhow::anyhow!(safe_error(&e)))?
+    };
     let mut chat = ChatRequest::new(request.history)
         .with_system(request.system)
         .with_store(false);
@@ -84,14 +104,14 @@ async fn conversation(request: Request, sender: &mpsc::Sender<Event>) -> Result<
         .with_capture_content(true)
         .with_capture_tool_calls(true)
         .with_capture_reasoning_content(true)
-        .with_stream_header_timeout(Duration::from_secs(30))
-        .with_stream_read_timeout(Duration::from_secs(30));
+        .with_stream_header_timeout(Duration::from_secs(120))
+        .with_stream_read_timeout(Duration::from_secs(120));
     let mut total = 0;
     let mut tool_count = 0;
     let mut proposed = false;
     for _ in 0..8 {
         let mut stream = client
-            .exec_chat_stream(&request.model, chat.clone(), Some(&options))
+            .exec_chat_stream(target.clone(), chat.clone(), Some(&options))
             .await
             .map_err(|e| anyhow::anyhow!(safe_error(&e)))?
             .stream;
@@ -168,7 +188,7 @@ async fn conversation(request: Request, sender: &mpsc::Sender<Event>) -> Result<
             let result = if call.fn_name == "propose_edit" {
                 if !request.allow_edits {
                     Err(anyhow::anyhow!(
-                        "An explicit editor attachment is required for proposed edits"
+                        "Document editing is unavailable in Chat mode"
                     ))
                 } else if proposed {
                     Err(anyhow::anyhow!("Only one proposal is allowed per turn"))
