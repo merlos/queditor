@@ -38,6 +38,10 @@ Paths containing spaces need quotes. Relative command paths use the chat workspa
 
 Opening another file or exiting with dirty content displays a save/discard/cancel
 confirmation. For an unnamed file, choose save, then enter `/save <path>` and retry.
+Popup questions and answers use distinct colors, with one answer per line. Use
+Up/Down and Enter, click an answer, or press its displayed shortcut. Escape cancels
+where shown. This interaction is consistent across confirmations, permissions,
+provider setup, credential warnings, model selection, and command suggestions.
 Existing symlinks resolve to their targets. NUL-containing or non-UTF-8 files are
 rejected, as are files larger than 8 MiB.
 
@@ -56,6 +60,10 @@ Use `""` as the replacement to delete occurrences.
 
 Enter submits. Ctrl+J inserts a newline; Shift+Enter works in terminals that
 distinguish it. Typing `/` shows suggestions: arrows select, Tab completes.
+Long prompt lines wrap within the composer. Up on the prompt's first visual line
+recalls older submitted prompts; Down on its last visual line moves toward newer
+prompts and eventually restores the unsent draft. Within a multiline or wrapped
+prompt, Up and Down move between visual lines instead.
 Escape clears unsent input. PageUp/PageDown or the wheel scroll chat. Scrolling
 away from the bottom stops auto-follow until you return to the bottom.
 Shift+Tab cycles agents while chat is focused. Ctrl+G toggles the selected agent

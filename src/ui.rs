@@ -1,5 +1,5 @@
 use crate::{
-    app::{App, Focus, Level},
+    app::{App, Focus, Level, Pending, composer_display_width, composer_rows},
     document::{display_width, grapheme_width},
 };
 use ratatui::{
@@ -362,7 +362,8 @@ fn chat(frame: &mut Frame, app: &mut App) {
     );
     let inside = block.inner(app.chat_area);
     frame.render_widget(block, app.chat_area);
-    let composer_height = (app.composer.lines().count() as u16 + 2)
+    let composer_width = usize::from(inside.width.saturating_sub(2)).max(1);
+    let composer_height = (composer_rows(&app.composer, composer_width).len() as u16 + 2)
         .clamp(3, 6)
         .min(inside.height);
     let areas = Layout::vertical([
@@ -422,16 +423,28 @@ fn chat(frame: &mut Frame, app: &mut App) {
     let input_area = input.inner(areas[2]);
     app.composer_area = input_area;
     frame.render_widget(input, areas[2]);
-    let before = &app.composer[..app.composer_cursor];
-    let cursor_row = before.bytes().filter(|b| *b == b'\n').count();
-    let cursor_col = display_width(before.rsplit('\n').next().unwrap_or(""));
+    let rows = composer_rows(&app.composer, usize::from(input_area.width).max(1));
+    let cursor_row = rows
+        .iter()
+        .rposition(|row| row.start <= app.composer_cursor)
+        .unwrap_or(0);
+    let cursor_col =
+        composer_display_width(&app.composer[rows[cursor_row].start..app.composer_cursor]);
     let vertical = cursor_row.saturating_sub(usize::from(input_area.height).saturating_sub(1));
-    let horizontal = cursor_col.saturating_sub(usize::from(input_area.width).saturating_sub(1));
-    let input_lines = app
-        .composer
-        .split('\n')
+    let input_lines = rows
+        .iter()
         .skip(vertical)
-        .map(|line| Line::from(crop(line, horizontal, usize::from(input_area.width))))
+        .map(|row| {
+            Line::from(
+                wrapped(
+                    &app.composer[row.start..row.end],
+                    usize::from(input_area.width),
+                )
+                .into_iter()
+                .next()
+                .unwrap_or_default(),
+            )
+        })
         .collect::<Vec<_>>();
     frame.render_widget(Paragraph::new(input_lines), input_area);
     if app.focus == Focus::Chat
@@ -442,7 +455,7 @@ fn chat(frame: &mut Frame, app: &mut App) {
         && input_area.height > 0
     {
         frame.set_cursor_position((
-            input_area.x + (cursor_col - horizontal) as u16,
+            input_area.x + cursor_col.min(usize::from(input_area.width.saturating_sub(1))) as u16,
             input_area.y + (cursor_row - vertical) as u16,
         ));
     }
@@ -456,6 +469,8 @@ fn chat(frame: &mut Frame, app: &mut App) {
             height,
         );
         let start = app.completion.saturating_sub(usize::from(height) - 1);
+        app.popup_choice_area = popup;
+        app.popup_choice_start = start;
         let suggestions = choices
             .iter()
             .enumerate()
@@ -519,24 +534,64 @@ fn explorer(frame: &mut Frame, app: &mut App) {
     frame.render_widget(Paragraph::new(lines), area);
 }
 
-fn confirmation(frame: &mut Frame, app: &App) {
+fn confirmation(frame: &mut Frame, app: &mut App) {
     let area = frame.area();
     let w = area.width.min(68);
-    let h = area.height.min(6);
+    let h = area.height.min(8);
     let popup = Rect::new(
         area.x + (area.width - w) / 2,
         area.y + (area.height - h) / 2,
         w,
         h,
     );
+    let options = [
+        ("S", "Save accepted content and continue"),
+        ("D", "Discard and continue"),
+        ("C / Esc", "Cancel"),
+    ];
+    app.popup_choice_area = Rect::new(
+        popup.x.saturating_add(1),
+        popup.y.saturating_add(4),
+        popup.width.saturating_sub(2),
+        options.len() as u16,
+    );
+    app.popup_choice_start = 0;
+    let question = match app.pending.as_ref() {
+        Some(Pending::Quit) => "Leave Queditor? Unsaved or pending work will be affected.",
+        Some(Pending::Open(_)) => {
+            "Open another document? Unsaved or pending work will be affected."
+        }
+        Some(Pending::Recover(_)) => {
+            "Restore this recovery? Unsaved or pending work will be affected."
+        }
+        None => "Continue? Unsaved or pending work will be affected.",
+    };
+    let mut lines = vec![Line::styled(
+        question,
+        Style::default()
+            .fg(app.theme.yellow)
+            .add_modifier(Modifier::BOLD),
+    )];
+    lines.push(Line::styled(
+        "↑/↓ select · Enter choose · click an answer",
+        Style::default().fg(app.theme.muted),
+    ));
+    lines.push(Line::default());
+    lines.extend(
+        options.iter().enumerate().map(|(index, (key, label))| {
+            popup_option(index == app.popup_selected, key, label, app)
+        }),
+    );
     frame.render_widget(Clear, popup);
-    frame.render_widget(Paragraph::new("Unsaved content, pending proposal, or running agent.\nS: save accepted content and continue (agent cancelled)\nD: discard and continue · Esc: cancel")
-        .wrap(ratatui::widgets::Wrap { trim: false })
-        .block(Block::default().borders(Borders::ALL).title(" Confirm "))
-        .style(Style::default().bg(app.theme.bg).fg(app.theme.yellow)), popup);
+    frame.render_widget(
+        Paragraph::new(lines)
+            .block(Block::default().borders(Borders::ALL).title(" Confirm "))
+            .style(Style::default().bg(app.theme.bg)),
+        popup,
+    );
 }
 
-fn permission(frame: &mut Frame, app: &App) {
+fn permission(frame: &mut Frame, app: &mut App) {
     let Some(prompt) = &app.live.permission else {
         return;
     };
@@ -550,26 +605,67 @@ fn permission(frame: &mut Frame, app: &App) {
         h,
     );
     frame.render_widget(Clear, popup);
-    let text = format!(
-        "Operation: {}\nPath: {}\n{}\nApproving sends the returned text/listing to {}.\nO: once · S: session · A: always for this exact path/operation\nN/Esc: deny · Ctrl+C: cancel agent · Ctrl+Q: exit",
-        prompt.target.operation,
-        safe(&prompt.target.path.display().to_string()),
-        if prompt.target.outside_workspace() {
-            "WARNING: outside current workspace"
-        } else {
-            "Inside current workspace (still requires approval)"
-        },
-        safe(&app.config.model)
+    let options = [
+        ("O", "Allow once"),
+        ("S", "Allow for this session"),
+        ("A", "Always allow this exact path and operation"),
+        ("N / Esc", "Deny"),
+    ];
+    app.popup_choice_area = Rect::new(
+        popup.x.saturating_add(1),
+        popup.y.saturating_add(5),
+        popup.width.saturating_sub(2),
+        options.len() as u16,
+    );
+    app.popup_choice_start = 0;
+    let mut lines = vec![
+        Line::styled(
+            format!("Allow the agent to {} this path?", prompt.target.operation),
+            Style::default()
+                .fg(app.theme.yellow)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Line::styled(
+            safe(&prompt.target.path.display().to_string()),
+            Style::default().fg(app.theme.fg),
+        ),
+        Line::styled(
+            if prompt.target.outside_workspace() {
+                format!(
+                    "WARNING: outside workspace · data goes to {}",
+                    safe(&app.config.model)
+                )
+            } else {
+                format!(
+                    "Inside workspace · returned data goes to {}",
+                    safe(&app.config.model)
+                )
+            },
+            Style::default().fg(if prompt.target.outside_workspace() {
+                app.theme.red
+            } else {
+                app.theme.muted
+            }),
+        ),
+        Line::styled(
+            "↑/↓ select · Enter choose · click an answer",
+            Style::default().fg(app.theme.muted),
+        ),
+        Line::default(),
+    ];
+    lines.extend(
+        options.iter().enumerate().map(|(index, (key, label))| {
+            popup_option(index == app.popup_selected, key, label, app)
+        }),
     );
     frame.render_widget(
-        Paragraph::new(text)
-            .wrap(ratatui::widgets::Wrap { trim: false })
+        Paragraph::new(lines)
             .block(
                 Block::default()
                     .borders(Borders::ALL)
                     .title(" Agent file permission "),
             )
-            .style(Style::default().bg(app.theme.bg).fg(app.theme.yellow)),
+            .style(Style::default().bg(app.theme.bg)),
         popup,
     );
 }
@@ -590,9 +686,16 @@ fn connect(frame: &mut Frame, app: &mut App) {
     );
     app.connect_choice_area = Rect::default();
     if matches!(wizard.step, ConnectStep::Provider) {
-        let mut lines = vec![Line::from(
-            "↑/↓ select · Enter choose · click a provider · Esc cancel",
+        let mut lines = vec![Line::styled(
+            "Which provider do you want to connect?",
+            Style::default()
+                .fg(app.theme.accent)
+                .add_modifier(Modifier::BOLD),
         )];
+        lines.push(Line::styled(
+            "↑/↓ select · Enter choose · click an answer · Esc cancel",
+            Style::default().fg(app.theme.muted),
+        ));
         lines.push(Line::default());
         lines.extend(
             CONNECT_PROVIDER_NAMES
@@ -601,12 +704,13 @@ fn connect(frame: &mut Frame, app: &mut App) {
                 .map(|(index, provider)| {
                     Line::styled(
                         format!(
-                            "{} {}",
+                            "{} [{}] {}",
                             if index == wizard.provider_selected {
                                 ">"
                             } else {
                                 " "
                             },
+                            ["O", "A", "G", "R", "C"][index],
                             provider
                         ),
                         Style::default().fg(if index == wizard.provider_selected {
@@ -619,7 +723,7 @@ fn connect(frame: &mut Frame, app: &mut App) {
         );
         app.connect_choice_area = Rect::new(
             popup.x.saturating_add(1),
-            popup.y.saturating_add(3),
+            popup.y.saturating_add(4),
             popup.width.saturating_sub(2),
             CONNECT_PROVIDER_NAMES.len() as u16,
         );
@@ -637,9 +741,16 @@ fn connect(frame: &mut Frame, app: &mut App) {
         return;
     }
     if matches!(wizard.step, ConnectStep::Credential) {
-        let mut lines = vec![Line::from(
-            "↑/↓ select · Enter choose · click a source · Esc cancel",
+        let mut lines = vec![Line::styled(
+            "Where should Queditor obtain the credential?",
+            Style::default()
+                .fg(app.theme.accent)
+                .add_modifier(Modifier::BOLD),
         )];
+        lines.push(Line::styled(
+            "↑/↓ select · Enter choose · click an answer · Esc cancel",
+            Style::default().fg(app.theme.muted),
+        ));
         lines.push(Line::default());
         lines.extend(
             CONNECT_CREDENTIAL_NAMES
@@ -648,12 +759,13 @@ fn connect(frame: &mut Frame, app: &mut App) {
                 .map(|(index, source)| {
                     Line::styled(
                         format!(
-                            "{} {}",
+                            "{} [{}] {}",
                             if index == wizard.credential_selected {
                                 ">"
                             } else {
                                 " "
                             },
+                            ["K", "E", "F"][index],
                             source
                         ),
                         Style::default().fg(if index == wizard.credential_selected {
@@ -671,7 +783,7 @@ fn connect(frame: &mut Frame, app: &mut App) {
         ));
         app.connect_choice_area = Rect::new(
             popup.x.saturating_add(1),
-            popup.y.saturating_add(3),
+            popup.y.saturating_add(4),
             popup.width.saturating_sub(2),
             CONNECT_CREDENTIAL_NAMES.len() as u16,
         );
@@ -729,7 +841,7 @@ fn connect(frame: &mut Frame, app: &mut App) {
         ),
         ConnectStep::PlaintextConfirm => (
             " Plaintext credential warning ",
-            "The key will be stored unencrypted in private credentials.yaml.\nY: continue · N: choose another source",
+            "The key will be stored unencrypted in private credentials.yaml.",
             String::new(),
             false,
         ),
@@ -747,6 +859,62 @@ fn connect(frame: &mut Frame, app: &mut App) {
             .style(Style::default().bg(app.theme.bg).fg(app.theme.fg)),
         popup,
     );
+    if matches!(wizard.step, ConnectStep::PlaintextConfirm) {
+        let options = [("Y", "Continue"), ("N", "Choose another source")];
+        app.popup_choice_area = Rect::new(
+            popup.x.saturating_add(1),
+            popup.y.saturating_add(4),
+            popup.width.saturating_sub(2),
+            options.len() as u16,
+        );
+        app.popup_choice_start = 0;
+        let lines = options
+            .iter()
+            .enumerate()
+            .map(|(index, (key, label))| popup_option(index == app.popup_selected, key, label, app))
+            .collect::<Vec<_>>();
+        frame.render_widget(
+            Paragraph::new(Line::styled(
+                "Store this API key as private plaintext?",
+                Style::default()
+                    .fg(app.theme.yellow)
+                    .add_modifier(Modifier::BOLD),
+            )),
+            Rect::new(
+                popup.x.saturating_add(1),
+                popup.y.saturating_add(1),
+                popup.width.saturating_sub(2),
+                1,
+            ),
+        );
+        frame.render_widget(
+            Paragraph::new(vec![
+                Line::styled(
+                    "The key will be unencrypted in private credentials.yaml.",
+                    Style::default().fg(app.theme.muted),
+                ),
+                Line::styled(
+                    "↑/↓ select · Enter choose · click an answer",
+                    Style::default().fg(app.theme.muted),
+                ),
+            ]),
+            Rect::new(
+                popup.x.saturating_add(1),
+                popup.y.saturating_add(2),
+                popup.width.saturating_sub(2),
+                2,
+            ),
+        );
+        frame.render_widget(
+            Paragraph::new(lines),
+            Rect::new(
+                popup.x.saturating_add(1),
+                popup.y.saturating_add(4),
+                popup.width.saturating_sub(2),
+                2,
+            ),
+        );
+    }
     if matches!(
         wizard.step,
         ConnectStep::Id
@@ -777,7 +945,7 @@ fn connect(frame: &mut Frame, app: &mut App) {
     }
 }
 
-fn model_picker(frame: &mut Frame, app: &App) {
+fn model_picker(frame: &mut Frame, app: &mut App) {
     let Some(picker) = &app.model_picker else {
         return;
     };
@@ -790,29 +958,44 @@ fn model_picker(frame: &mut Frame, app: &App) {
         w,
         h,
     );
-    let visible = usize::from(h.saturating_sub(2));
+    let visible = usize::from(h.saturating_sub(3));
     let start = picker.selected.saturating_sub(visible.saturating_sub(1));
-    let lines = picker
-        .models
-        .iter()
-        .enumerate()
-        .skip(start)
-        .take(visible)
-        .map(|(index, model)| {
-            Line::styled(
-                format!(
-                    "{} {}",
-                    if index == picker.selected { ">" } else { " " },
-                    safe(model)
-                ),
-                Style::default().fg(if index == picker.selected {
-                    app.theme.accent
-                } else {
-                    app.theme.fg
-                }),
-            )
-        })
-        .collect::<Vec<_>>();
+    app.popup_choice_area = Rect::new(
+        popup.x.saturating_add(1),
+        popup.y.saturating_add(2),
+        popup.width.saturating_sub(2),
+        (picker.models.len().saturating_sub(start).min(visible)) as u16,
+    );
+    app.popup_choice_start = start;
+    let mut lines = vec![Line::styled(
+        "Which model do you want to use?",
+        Style::default()
+            .fg(app.theme.accent)
+            .add_modifier(Modifier::BOLD),
+    )];
+    lines.extend(
+        picker
+            .models
+            .iter()
+            .enumerate()
+            .skip(start)
+            .take(visible)
+            .map(|(index, model)| {
+                Line::styled(
+                    format!(
+                        "{} {}",
+                        if index == picker.selected { ">" } else { " " },
+                        safe(model)
+                    ),
+                    Style::default().fg(if index == picker.selected {
+                        app.theme.accent
+                    } else {
+                        app.theme.fg
+                    }),
+                )
+            })
+            .collect::<Vec<_>>(),
+    );
     frame.render_widget(Clear, popup);
     frame.render_widget(
         Paragraph::new(lines)
@@ -824,6 +1007,29 @@ fn model_picker(frame: &mut Frame, app: &App) {
             .style(Style::default().bg(app.theme.bg)),
         popup,
     );
+}
+
+fn popup_option<'a>(selected: bool, key: &'a str, label: &'a str, app: &App) -> Line<'a> {
+    Line::from(vec![
+        Span::styled(
+            if selected { "> " } else { "  " },
+            Style::default().fg(app.theme.accent),
+        ),
+        Span::styled(
+            format!("[{key}] "),
+            Style::default()
+                .fg(app.theme.accent)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(
+            label,
+            Style::default().fg(app.theme.fg).bg(if selected {
+                app.theme.selection
+            } else {
+                app.theme.bg
+            }),
+        ),
+    ])
 }
 
 fn safe(text: &str) -> String {
@@ -910,6 +1116,18 @@ mod tests {
         app.compose_insert(&"界".repeat(100));
         let mut terminal = Terminal::new(TestBackend::new(80, 30)).unwrap();
         terminal.draw(|f| draw(f, &mut app)).unwrap();
+    }
+    #[test]
+    fn long_composer_lines_soft_wrap_without_changing_input() {
+        let mut app = App::new(None).unwrap();
+        app.focus = Focus::Chat;
+        let input = "prompt text that must wrap across several visual rows ".repeat(3);
+        app.compose_insert(&input);
+        let mut terminal = Terminal::new(TestBackend::new(80, 30)).unwrap();
+        terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+
+        assert_eq!(app.composer, input);
+        assert!(composer_rows(&input, usize::from(app.composer_area.width)).len() > 1);
     }
     #[test]
     fn long_editor_lines_soft_wrap_without_changing_text() {

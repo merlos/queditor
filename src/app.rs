@@ -1,6 +1,6 @@
 use crate::{
     config::{AgentMode, Bindings, Config, Credential, Provider, Theme, config_dir},
-    document::{Document, absolute, next, previous},
+    document::{Document, absolute, grapheme_width, next, previous},
 };
 use anyhow::{Context, Result, bail};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
@@ -123,6 +123,9 @@ pub struct App {
     pub messages: Vec<Message>,
     pub composer: String,
     pub composer_cursor: usize,
+    prompt_history: Vec<String>,
+    prompt_history_index: Option<usize>,
+    prompt_history_draft: String,
     pub completion: usize,
     pub chat_scroll: usize,
     pub follow_chat: bool,
@@ -148,6 +151,9 @@ pub struct App {
     pub connect: Option<ConnectWizard>,
     pub connect_choice_area: Rect,
     pub model_picker: Option<ModelPicker>,
+    pub popup_choice_area: Rect,
+    pub popup_choice_start: usize,
+    pub popup_selected: usize,
     pub animation_frame: usize,
 }
 
@@ -255,6 +261,9 @@ impl App {
             messages: vec![],
             composer: String::new(),
             composer_cursor: 0,
+            prompt_history: vec![],
+            prompt_history_index: None,
+            prompt_history_draft: String::new(),
             completion: 0,
             chat_scroll: 0,
             follow_chat: true,
@@ -293,6 +302,9 @@ impl App {
             connect: None,
             connect_choice_area: Rect::default(),
             model_picker: None,
+            popup_choice_area: Rect::default(),
+            popup_choice_start: 0,
+            popup_selected: 0,
             animation_frame: 0,
         };
         if app.config.model == "mock" {
@@ -554,6 +566,7 @@ impl App {
             KeyCode::Home => self.composer_cursor = 0,
             KeyCode::End => self.composer_cursor = self.composer.len(),
             KeyCode::Backspace if self.composer_cursor > 0 => {
+                self.stop_browsing_prompt_history();
                 let start = previous(&self.composer, self.composer_cursor);
                 self.composer.replace_range(start..self.composer_cursor, "");
                 self.composer_cursor = start;
@@ -563,6 +576,7 @@ impl App {
                     self.composer_cursor..next(&self.composer, self.composer_cursor),
                     "",
                 );
+                self.stop_browsing_prompt_history();
             }
             KeyCode::Up if !self.completions().is_empty() => {
                 self.completion = self.completion.saturating_sub(1)
@@ -570,6 +584,8 @@ impl App {
             KeyCode::Down if !self.completions().is_empty() => {
                 self.completion = (self.completion + 1).min(self.completions().len() - 1)
             }
+            KeyCode::Up => self.composer_vertical(-1),
+            KeyCode::Down => self.composer_vertical(1),
             KeyCode::PageUp => {
                 self.follow_chat = false;
                 self.chat_scroll = self.chat_scroll.saturating_sub(10);
@@ -580,6 +596,7 @@ impl App {
             KeyCode::Esc => {
                 self.composer.clear();
                 self.composer_cursor = 0;
+                self.stop_browsing_prompt_history();
             }
             KeyCode::Char(c)
                 if !key
@@ -606,6 +623,7 @@ impl App {
     }
 
     pub fn compose_insert(&mut self, text: &str) {
+        self.stop_browsing_prompt_history();
         self.composer.insert_str(self.composer_cursor, text);
         let end = self.composer_cursor + text.len();
         self.composer_cursor = unicode_segmentation::UnicodeSegmentation::grapheme_indices(
@@ -616,6 +634,80 @@ impl App {
         .find(|i| *i >= end)
         .unwrap_or(self.composer.len());
         self.completion = 0;
+    }
+
+    fn composer_vertical(&mut self, delta: isize) {
+        let width = usize::from(self.composer_area.width).max(1);
+        let rows = composer_rows(&self.composer, width);
+        let row = rows
+            .iter()
+            .rposition(|row| row.start <= self.composer_cursor)
+            .unwrap_or(0);
+        if delta < 0 && row == 0 {
+            self.previous_prompt();
+            return;
+        }
+        if delta > 0 && row + 1 == rows.len() {
+            self.next_prompt();
+            return;
+        }
+        let target = row.saturating_add_signed(delta).min(rows.len() - 1);
+        let column = composer_display_width(&self.composer[rows[row].start..self.composer_cursor]);
+        self.composer_cursor = composer_position_at_display(&self.composer, rows[target], column);
+    }
+
+    fn previous_prompt(&mut self) {
+        if self.prompt_history.is_empty() {
+            return;
+        }
+        let index = match self.prompt_history_index {
+            Some(index) => index.saturating_sub(1),
+            None => {
+                self.prompt_history_draft = self.composer.clone();
+                self.prompt_history.len() - 1
+            }
+        };
+        self.load_prompt_history(index);
+    }
+
+    fn next_prompt(&mut self) {
+        let Some(index) = self.prompt_history_index else {
+            return;
+        };
+        if index + 1 < self.prompt_history.len() {
+            self.load_prompt_history(index + 1);
+        } else {
+            self.composer = std::mem::take(&mut self.prompt_history_draft);
+            self.composer_cursor = self.composer.len();
+            self.prompt_history_index = None;
+        }
+    }
+
+    fn load_prompt_history(&mut self, index: usize) {
+        self.composer.clone_from(&self.prompt_history[index]);
+        self.composer_cursor = self.composer.len();
+        self.prompt_history_index = Some(index);
+        self.completion = 0;
+    }
+
+    fn stop_browsing_prompt_history(&mut self) {
+        self.prompt_history_index = None;
+        self.prompt_history_draft.clear();
+    }
+
+    pub(crate) fn clear_prompt_history(&mut self) {
+        self.prompt_history.clear();
+        self.stop_browsing_prompt_history();
+    }
+
+    pub(crate) fn rebuild_prompt_history(&mut self) {
+        self.prompt_history = self
+            .messages
+            .iter()
+            .filter(|message| message.role == "you")
+            .map(|message| message.text.clone())
+            .collect();
+        self.stop_browsing_prompt_history();
     }
 
     pub fn paste(&mut self, text: &str) {
@@ -690,6 +782,8 @@ impl App {
                 .unwrap_or_default();
             self.message("mock", format!("{} is selected.{context} Mock mode is selected. /models <provider::model> enables live AI. /demo previews an uppercase edit; /rewrite <text> previews a replacement.", self.agents[self.agent].name));
         }
+        self.prompt_history.push(input);
+        self.stop_browsing_prompt_history();
         self.composer.clear();
         self.composer_cursor = 0;
         self.completion = 0;
@@ -1139,6 +1233,10 @@ impl App {
             ConnectStep::PlaintextConfirm => match key.code {
                 KeyCode::Char('y') => wizard.step = ConnectStep::SecretFile,
                 KeyCode::Char('n') => wizard.step = ConnectStep::Credential,
+                KeyCode::Up => self.popup_selected = self.popup_selected.saturating_sub(1),
+                KeyCode::Down => self.popup_selected = (self.popup_selected + 1).min(1),
+                KeyCode::Enter if self.popup_selected == 0 => wizard.step = ConnectStep::SecretFile,
+                KeyCode::Enter => wizard.step = ConnectStep::Credential,
                 _ => {}
             },
             _ => match key.code {
@@ -1240,7 +1338,10 @@ impl App {
         wizard.step = match wizard.credential_selected {
             0 => ConnectStep::SecretKeyring,
             1 => ConnectStep::Env,
-            _ => ConnectStep::PlaintextConfirm,
+            _ => {
+                self.popup_selected = 0;
+                ConnectStep::PlaintextConfirm
+            }
         };
     }
 
@@ -1504,6 +1605,7 @@ impl App {
     pub(crate) fn request(&mut self, operation: Pending) {
         if self.document.dirty() || self.proposal.is_some() || self.busy() {
             self.pending = Some(operation);
+            self.popup_selected = 0;
         } else {
             self.perform(operation);
         }
@@ -1511,12 +1613,18 @@ impl App {
     fn confirm_key(&mut self, key: KeyEvent) {
         match key.code {
             KeyCode::Esc | KeyCode::Char('c') => self.pending = None,
-            KeyCode::Char('d') => {
-                if let Some(p) = self.pending.take() {
-                    self.perform(p);
-                }
-            }
-            KeyCode::Char('s') => {
+            KeyCode::Up => self.popup_selected = self.popup_selected.saturating_sub(1),
+            KeyCode::Down => self.popup_selected = (self.popup_selected + 1).min(2),
+            KeyCode::Enter => self.confirm_choice(self.popup_selected),
+            KeyCode::Char('d') => self.confirm_choice(1),
+            KeyCode::Char('s') => self.confirm_choice(0),
+            _ => {}
+        }
+    }
+
+    fn confirm_choice(&mut self, choice: usize) {
+        match choice {
+            0 => {
                 if self.document.path.is_none() {
                     self.pending = None;
                     self.focus = Focus::Chat;
@@ -1537,7 +1645,12 @@ impl App {
                     }
                 }
             }
-            _ => {}
+            1 => {
+                if let Some(p) = self.pending.take() {
+                    self.perform(p);
+                }
+            }
+            _ => self.pending = None,
         }
     }
     fn perform(&mut self, operation: Pending) {
@@ -1641,7 +1754,32 @@ impl App {
             self.connect_mouse(event);
             return;
         }
-        if self.pending.is_some() || self.live.permission.is_some() || self.model_picker.is_some() {
+        if self.pending.is_some() {
+            if let Some(choice) = self.popup_mouse_choice(event) {
+                self.popup_selected = choice.min(2);
+                self.confirm_choice(self.popup_selected);
+            }
+            return;
+        }
+        if self.live.permission.is_some() {
+            if let Some(choice) = self.popup_mouse_choice(event) {
+                self.popup_selected = choice.min(3);
+                self.resolve_permission_choice(self.popup_selected);
+            }
+            return;
+        }
+        if self.model_picker.is_some() {
+            if let Some(choice) = self.popup_mouse_choice(event) {
+                self.select_model_picker_at(choice);
+            }
+            return;
+        }
+        if self.focus == Focus::Chat
+            && !self.completions().is_empty()
+            && let Some(choice) = self.popup_mouse_choice(event)
+        {
+            self.completion = choice.min(self.completions().len() - 1);
+            self.complete();
             return;
         }
         let x = event.column;
@@ -1707,6 +1845,22 @@ impl App {
     }
 
     fn connect_mouse(&mut self, event: MouseEvent) {
+        if matches!(
+            self.connect.as_ref().map(|wizard| wizard.step),
+            Some(ConnectStep::PlaintextConfirm)
+        ) {
+            if let Some(choice) = self.popup_mouse_choice(event) {
+                self.popup_selected = choice.min(1);
+                if let Some(wizard) = self.connect.as_mut() {
+                    wizard.step = if self.popup_selected == 0 {
+                        ConnectStep::SecretFile
+                    } else {
+                        ConnectStep::Credential
+                    };
+                }
+            }
+            return;
+        }
         if !matches!(event.kind, MouseEventKind::Down(MouseButton::Left))
             || event.column < self.connect_choice_area.x
             || event.column >= self.connect_choice_area.right()
@@ -1720,6 +1874,30 @@ impl App {
             Some(ConnectStep::Provider) => self.select_connect_provider_at(selected),
             Some(ConnectStep::Credential) => self.select_connect_credential_at(selected),
             _ => {}
+        }
+    }
+
+    fn popup_mouse_choice(&self, event: MouseEvent) -> Option<usize> {
+        if !matches!(event.kind, MouseEventKind::Down(MouseButton::Left))
+            || !self
+                .popup_choice_area
+                .contains((event.column, event.row).into())
+        {
+            return None;
+        }
+        Some(self.popup_choice_start + usize::from(event.row - self.popup_choice_area.y))
+    }
+
+    fn select_model_picker_at(&mut self, selected: usize) {
+        let Some(picker) = self.model_picker.as_ref() else {
+            return;
+        };
+        let Some(model) = picker.models.get(selected).cloned() else {
+            return;
+        };
+        self.model_picker = None;
+        if let Err(error) = self.select_model(model) {
+            self.notify(Level::Error, format!("Could not remember model: {error:#}"));
         }
     }
 
@@ -1899,6 +2077,65 @@ fn open_or_new(path: &Path) -> Result<Document> {
         Ok(d)
     }
 }
+
+#[derive(Clone, Copy)]
+pub(crate) struct ComposerRow {
+    pub start: usize,
+    pub end: usize,
+}
+
+pub(crate) fn composer_rows(text: &str, width: usize) -> Vec<ComposerRow> {
+    use unicode_segmentation::UnicodeSegmentation;
+
+    let width = width.max(1);
+    let mut rows = Vec::new();
+    let mut start = 0;
+    let mut column = 0;
+    for (byte, grapheme) in text.grapheme_indices(true) {
+        if grapheme == "\n" {
+            rows.push(ComposerRow { start, end: byte });
+            start = byte + 1;
+            column = 0;
+            continue;
+        }
+        let mut grapheme_columns = grapheme_width(grapheme, column);
+        if column > 0 && column + grapheme_columns > width {
+            rows.push(ComposerRow { start, end: byte });
+            start = byte;
+            column = 0;
+            grapheme_columns = grapheme_width(grapheme, 0);
+        }
+        column += grapheme_columns;
+    }
+    rows.push(ComposerRow {
+        start,
+        end: text.len(),
+    });
+    rows
+}
+
+pub(crate) fn composer_display_width(text: &str) -> usize {
+    use unicode_segmentation::UnicodeSegmentation;
+
+    text.graphemes(true).fold(0, |column, grapheme| {
+        column + grapheme_width(grapheme, column)
+    })
+}
+
+fn composer_position_at_display(text: &str, row: ComposerRow, target: usize) -> usize {
+    use unicode_segmentation::UnicodeSegmentation;
+
+    let mut column = 0;
+    for (byte, grapheme) in text[row.start..row.end].grapheme_indices(true) {
+        let width = grapheme_width(grapheme, column);
+        if target < column + width {
+            return row.start + byte;
+        }
+        column += width;
+    }
+    row.end
+}
+
 fn key_name(key: KeyEvent) -> String {
     let mut s = String::new();
     if key.modifiers.contains(KeyModifiers::CONTROL) {
@@ -2105,6 +2342,52 @@ mod tests {
         assert_eq!(a.messages.len(), before);
     }
     #[test]
+    fn prompt_history_recalls_submissions_and_restores_draft() {
+        let mut a = app();
+        a.focus = Focus::Chat;
+        a.config.model = "mock".into();
+        a.composer_area = Rect::new(0, 0, 40, 4);
+        for prompt in ["first", "second"] {
+            a.compose_insert(prompt);
+            a.submit();
+        }
+        a.compose_insert("unsent draft");
+
+        a.key(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE));
+        assert_eq!(a.composer, "second");
+        a.key(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE));
+        assert_eq!(a.composer, "first");
+        a.key(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE));
+        assert_eq!(a.composer, "first");
+        a.key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+        assert_eq!(a.composer, "second");
+        a.key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+        assert_eq!(a.composer, "unsent draft");
+    }
+    #[test]
+    fn prompt_arrows_move_visual_rows_before_recalling_history() {
+        let mut a = app();
+        a.focus = Focus::Chat;
+        a.config.model = "mock".into();
+        a.composer_area = Rect::new(0, 0, 4, 4);
+        a.compose_insert("old");
+        a.submit();
+        a.compose_insert("abcdEF");
+
+        a.key(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE));
+        assert_eq!(a.composer, "abcdEF");
+        assert_eq!(a.composer_cursor, 2);
+        a.key(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE));
+        assert_eq!(a.composer, "old");
+
+        a.composer = "one\ntwo".into();
+        a.composer_cursor = 0;
+        a.stop_browsing_prompt_history();
+        a.key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+        assert_eq!(a.composer, "one\ntwo");
+        assert_eq!(a.composer_cursor, 4);
+    }
+    #[test]
     fn terminal_paste_populates_masked_api_key_without_touching_chat() {
         let mut a = app();
         let before = a.messages.len();
@@ -2182,5 +2465,75 @@ mod tests {
         a.key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
         assert!(!a.quit);
         assert!(a.pending.is_none());
+    }
+    #[test]
+    fn confirmation_supports_arrows_enter_and_mouse() {
+        let mut a = app();
+        a.document.insert("unsaved");
+        a.request(Pending::Quit);
+        a.key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+        assert_eq!(a.popup_selected, 1);
+        a.key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+        a.key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert!(a.pending.is_none());
+        assert!(!a.quit);
+
+        a.request(Pending::Quit);
+        a.popup_choice_area = Rect::new(10, 5, 40, 3);
+        a.mouse(MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: 12,
+            row: 6,
+            modifiers: KeyModifiers::NONE,
+        });
+        assert!(a.quit);
+    }
+    #[test]
+    fn plaintext_warning_supports_arrows_enter_and_mouse() {
+        let mut a = app();
+        a.command("/connect").unwrap();
+        a.select_connect_provider_at(0);
+        a.select_connect_credential_at(2);
+        a.key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+        a.key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert!(matches!(
+            a.connect.as_ref().unwrap().step,
+            ConnectStep::Credential
+        ));
+
+        a.select_connect_credential_at(2);
+        a.popup_choice_area = Rect::new(10, 5, 40, 2);
+        a.mouse(MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: 12,
+            row: 5,
+            modifiers: KeyModifiers::NONE,
+        });
+        assert!(matches!(
+            a.connect.as_ref().unwrap().step,
+            ConnectStep::SecretFile
+        ));
+    }
+    #[test]
+    fn model_picker_supports_arrows_enter_and_mouse() {
+        let mut a = app();
+        a.config.models = vec!["provider::one".into(), "provider::two".into()];
+        a.open_model_picker();
+        a.key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+        a.key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert!(a.model_picker.is_none());
+
+        a.open_model_picker();
+        let selected = a.model_picker.as_ref().unwrap().models.len() - 1;
+        let expected = a.model_picker.as_ref().unwrap().models[selected].clone();
+        a.popup_choice_area = Rect::new(10, 5, 40, (selected + 1) as u16);
+        a.mouse(MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: 12,
+            row: 5 + selected as u16,
+            modifiers: KeyModifiers::NONE,
+        });
+        assert_eq!(a.config.model, expected);
+        assert!(a.model_picker.is_none());
     }
 }

@@ -18,14 +18,14 @@ the stated subset exists, and **Planned** means not yet delivered.
 | ED-005 | Markdown/frontmatter | Partial: visible-source basic headings, emphasis, code, frontmatter colors; not a full parser. |
 | ED-006 | Clipboard | Partial: internal copy/cut/paste and terminal bracketed paste; OS clipboard pending. |
 | ED-007 | Search/replace | Implemented: `/find` and undoable `/replace` all, via chat commands. |
-| UI-001 | Responsive panes | Implemented: at least 80/40 content columns at widths >=124; stacked below that; Unicode-aware editor soft wrapping; minimum 30×10. |
+| UI-001 | Responsive panes | Implemented: at least 80/40 content columns at widths >=124; stacked below that; Unicode-aware editor soft wrapping; minimum 30×10; consistently colored one-answer-per-line popups with shortcuts, arrows/Enter, and mouse selection. |
 | UI-002 | Status | Implemented: dirty filename, line/column, focus, actual model/agent, running state, labeled severity colors. |
 | UI-003 | Themes | Partial: embedded Mocha/daylight; runtime selection and startup config; custom palettes pending. |
 | FILE-001 | Open/save | Implemented: open UTF-8, create missing paths, save explicitly; directory must exist. |
 | FILE-002 | Data-loss guards | Implemented: dirty confirmation, disk-baseline checks before save, no overwrite of another existing path. |
 | FILE-003 | Explorer | Implemented: flat current folder, parent entry, folders first, arrows/Enter/Escape, preserves chat. |
 | FILE-004 | Recovery | Implemented: private accepted-text checkpoints, explicit restore/delete, no implicit document writes. |
-| CHAT-001 | Composer | Implemented: Enter submit, Ctrl+J newline, Shift+Enter when supported, slash completion, scrollable history. |
+| CHAT-001 | Composer | Implemented: Enter submit, Ctrl+J newline, Shift+Enter when supported, soft-wrapped input, boundary-aware Up/Down prompt recall, slash completion, scrollable history. |
 | CHAT-002 | Commands | Implemented: local commands, keyboard/mouse guided provider and credential selection with visible text cursor and masked typing/paste, persisted agent/model/per-agent mode selection, configured/arbitrary and discovered models, live compaction and cancellation; discovery depends on provider model-list support. |
 | CHAT-003 | Sessions | Implemented: optional private history persistence, list/resume-as-new/delete; no temporary grant or pending proposal restoration. |
 | CHAT-004 | Live streaming/cancel | Implemented: genai multi-provider streaming on Tokio, bounded queues/budgets, animated activity states, universal Escape cancellation, extended request/stream timeouts, safe error messages. |

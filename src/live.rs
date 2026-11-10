@@ -247,6 +247,7 @@ impl App {
                             target: *target,
                             reply,
                         });
+                        self.popup_selected = 0;
                     }
                 }
                 Event::Proposal(text) => {
@@ -428,20 +429,33 @@ impl App {
     pub fn permission_key(&mut self, key: crossterm::event::KeyEvent) {
         use crossterm::event::KeyCode;
         let choice = match key.code {
-            KeyCode::Char('o') => 1,
-            KeyCode::Char('s') => 2,
-            KeyCode::Char('a') => 3,
-            KeyCode::Char('n' | 'd') | KeyCode::Esc => 0,
+            KeyCode::Up => {
+                self.popup_selected = self.popup_selected.saturating_sub(1);
+                return;
+            }
+            KeyCode::Down => {
+                self.popup_selected = (self.popup_selected + 1).min(3);
+                return;
+            }
+            KeyCode::Enter => self.popup_selected,
+            KeyCode::Char('o') => 0,
+            KeyCode::Char('s') => 1,
+            KeyCode::Char('a') => 2,
+            KeyCode::Char('n' | 'd') | KeyCode::Esc => 3,
             _ => return,
         };
+        self.resolve_permission_choice(choice);
+    }
+
+    pub(crate) fn resolve_permission_choice(&mut self, choice: usize) {
         let Some(prompt) = self.live.permission.take() else {
             return;
         };
         let grant = prompt.target.grant();
-        if choice == 2 {
+        if choice == 1 {
             self.live.permissions.session.push(grant.clone());
         }
-        if choice == 3 {
+        if choice == 2 {
             let Some(store) = &self.live.store else {
                 let _ = prompt.reply.send(None);
                 self.notify(
@@ -461,14 +475,14 @@ impl App {
             }
             self.live.permissions.saved = saved;
         }
-        let _ = prompt.reply.send(if choice == 0 {
+        let _ = prompt.reply.send(if choice == 3 {
             None
         } else {
             Some(prompt.target)
         });
         self.notify(
             Level::Info,
-            if choice == 0 {
+            if choice == 3 {
                 "File access denied"
             } else {
                 "Exact-path file access approved"
@@ -517,6 +531,7 @@ impl App {
         self.live.permissions.clear_session();
         self.live.session_id = uuid::Uuid::new_v4().to_string();
         self.messages.clear();
+        self.clear_prompt_history();
         self.attachment = None;
         self.chat_scroll = 0;
         self.message(
@@ -587,6 +602,7 @@ impl App {
                 self.attachment = None;
                 self.live.history = record.history;
                 self.messages = record.messages;
+                self.rebuild_prompt_history();
                 self.config.model = record.model;
                 self.workspace = workspace;
                 self.agent = self
