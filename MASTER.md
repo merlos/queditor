@@ -69,4 +69,6 @@ does not open the document and restore never writes it. See `docs/live-ai.md`.
 The main AI workflow now exists through genai, with mock mode retained. This is
 still an early prototype: provider-account compatibility, stronger terminal/signal
 testing, OS clipboard, full Markdown parsing, wrapping/indent controls, custom
-themes/key chords, large-file latency, and release packaging remain unfinished.
+themes/key chords, and large-file latency remain unfinished. Native unsigned
+release archives and checksums are automated; signing, notarization, and package-
+manager formats remain future work.

@@ -145,6 +145,19 @@ impl Store {
 }
 
 pub fn state_dir() -> PathBuf {
+    #[cfg(windows)]
+    {
+        return std::env::var_os("LOCALAPPDATA")
+            .map(PathBuf::from)
+            .or_else(|| {
+                std::env::var_os("USERPROFILE")
+                    .map(PathBuf::from)
+                    .map(|home| home.join("AppData/Local"))
+            })
+            .unwrap_or_else(|| PathBuf::from("."))
+            .join("queditor");
+    }
+    #[cfg(not(windows))]
     std::env::var_os("XDG_STATE_HOME")
         .map(PathBuf::from)
         .unwrap_or_else(|| {

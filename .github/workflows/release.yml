@@ -1,0 +1,137 @@
+name: Release binaries
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: ${{ matrix.label }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - label: Linux x86-64
+            os: ubuntu-latest
+            target: x86_64-unknown-linux-musl
+            archive: tar.gz
+          - label: Windows x86-64
+            os: windows-latest
+            target: x86_64-pc-windows-msvc
+            archive: zip
+          - label: macOS Intel
+            os: macos-15-intel
+            target: x86_64-apple-darwin
+            archive: tar.gz
+          - label: macOS Apple Silicon
+            os: macos-15
+            target: aarch64-apple-darwin
+            archive: tar.gz
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Validate release version
+        shell: bash
+        run: |
+          args=()
+          if [[ "${GITHUB_REF_TYPE}" == "tag" ]]; then
+            args+=(--tag "${GITHUB_REF_NAME}")
+          fi
+          python3 scripts/release.py version "${args[@]}" >> "${GITHUB_ENV}"
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Install Linux static-linking tools
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install --yes musl-tools
+
+      - name: Run Rust tests
+        run: cargo test --locked
+
+      - name: Build release binary
+        run: cargo build --release --locked --target ${{ matrix.target }}
+
+      - name: Smoke-test release binary (Unix)
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          binary="target/${{ matrix.target }}/release/queditor"
+          "${binary}" --version
+          "${binary}" --check
+
+      - name: Verify static Linux binary
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          if ldd "target/${{ matrix.target }}/release/queditor" 2>&1 | grep -q '=>'; then
+            echo "Linux release unexpectedly has shared-library dependencies" >&2
+            ldd "target/${{ matrix.target }}/release/queditor" >&2
+            exit 1
+          fi
+
+      - name: Smoke-test release binary (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          & "target/${{ matrix.target }}/release/queditor.exe" --version
+          & "target/${{ matrix.target }}/release/queditor.exe" --check
+
+      - name: Package release archive
+        shell: bash
+        run: >-
+          python3 scripts/release.py package
+          --target "${{ matrix.target }}"
+          --archive "${{ matrix.archive }}"
+          --version "${RELEASE_VERSION}"
+          --output dist
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: queditor-${{ matrix.target }}
+          path: dist/*
+          if-no-files-found: error
+
+  publish:
+    name: Publish GitHub release
+    if: github.event_name == 'push' && github.ref_type == 'tag'
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: queditor-*
+          path: dist
+          merge-multiple: true
+
+      - name: Generate checksums
+        run: python3 scripts/release.py checksums --directory dist
+
+      - name: Publish unsigned binaries
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: >-
+          gh release create "${GITHUB_REF_NAME}"
+          dist/*
+          --verify-tag
+          --generate-notes
+          --title "Queditor ${GITHUB_REF_NAME}"

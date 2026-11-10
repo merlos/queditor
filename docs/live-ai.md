@@ -113,7 +113,8 @@ not a complete OS sandbox or a guarantee innocuously named files contain no secr
 
 ## Local state and recovery
 
-State lives in `$XDG_STATE_HOME/queditor/` or `~/.local/state/queditor/`:
+On Linux/macOS, state lives in `$XDG_STATE_HOME/queditor/` or
+`~/.local/state/queditor/`. On Windows it lives in `%LOCALAPPDATA%\queditor`:
 
 - `recovery-<instance-id>.json`: accepted unsaved text, cursor, path and save baseline.
 - `session-<session-id>.json`: transcript, committed history, model/agent and workspace.

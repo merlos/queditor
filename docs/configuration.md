@@ -1,7 +1,8 @@
 # Configuration
 
-The app reads `$XDG_CONFIG_HOME/queditor/config.yaml`, or
-`~/.config/queditor/config.yaml` when XDG_CONFIG_HOME is unset. It does not create
+On Linux/macOS, the app reads `$XDG_CONFIG_HOME/queditor/config.yaml`, or
+`~/.config/queditor/config.yaml` when XDG_CONFIG_HOME is unset. On Windows it reads
+`%APPDATA%\queditor\config.yaml`. It does not create
 or modify home-directory configuration automatically.
 
 ```yaml

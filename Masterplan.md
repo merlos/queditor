@@ -111,9 +111,11 @@ and its tools must not bypass Queditor review or local permissions.
 
 ### 7. Release hardening — recovery/persistence implemented; remainder planned
 
-Recovery, opt-in session persistence/deletion and local privacy modes are implemented.
-Remaining: clipboard support, large-file benchmarks, supported-terminal matrix,
-broader signal/terminal compatibility, packages, accessibility and complete release coverage.
+Recovery, opt-in session persistence/deletion, local privacy modes, and unsigned
+GitHub Release archives for Linux x86-64, Windows x86-64, Intel macOS, and Apple
+Silicon macOS are implemented. Remaining: signed/notarized artifacts, package-manager
+formats, clipboard support, large-file benchmarks, supported-terminal matrix,
+broader signal/terminal compatibility, accessibility and complete release coverage.
 Unix shutdown signals now checkpoint interrupted work and restore terminal state.
 
 Gate: a new user can install, configure a provider, edit, attach context, approve

@@ -71,6 +71,19 @@ pub fn validate_model(model: &str) -> Result<()> {
     Ok(())
 }
 pub fn config_dir() -> PathBuf {
+    #[cfg(windows)]
+    {
+        return std::env::var_os("APPDATA")
+            .map(PathBuf::from)
+            .or_else(|| {
+                std::env::var_os("USERPROFILE")
+                    .map(PathBuf::from)
+                    .map(|home| home.join("AppData/Roaming"))
+            })
+            .unwrap_or_else(|| PathBuf::from("."))
+            .join("queditor");
+    }
+    #[cfg(not(windows))]
     std::env::var_os("XDG_CONFIG_HOME")
         .map(PathBuf::from)
         .unwrap_or_else(|| {

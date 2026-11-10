@@ -54,6 +54,7 @@ cargo clippy --all-targets -- -D warnings
 cargo test
 cargo run -- --check
 python3 tests/terminal_smoke.py
+python3 tests/release_pipeline.py
 ```
 
 Add regression tests for bug fixes. Prioritize Unicode, data-loss prevention,

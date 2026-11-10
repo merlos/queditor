@@ -11,6 +11,29 @@ results to the selected provider. Edits still require explicit review.
 
 ## Run
 
+### Download a binary
+
+Unsigned binaries are published on the repository's
+[GitHub Releases](https://github.com/merlos/queditor/releases) page for:
+
+- Windows x86-64 (`.zip`)
+- Linux x86-64, statically linked (`.tar.gz`)
+- macOS Intel x86-64 (`.tar.gz`)
+- macOS Apple Silicon arm64 (`.tar.gz`)
+
+Download the archive for your platform, verify it against `SHA256SUMS` (or its
+adjacent `.sha256` file), extract it, and run `queditor` from a terminal. On
+Windows, run `queditor.exe` from PowerShell or Command Prompt. The first unsigned
+release may trigger Windows SmartScreen or macOS Gatekeeper; inspect the checksum
+and release source before choosing to run it. Code signing and notarization are
+planned, not currently provided.
+
+On macOS, an unsigned downloaded binary may need explicit approval in **System
+Settings → Privacy & Security**. Do not bypass security warnings for a binary whose
+checksum and release source you have not verified.
+
+### Build from source
+
 Install a current stable Rust toolchain, then:
 
 ```sh
@@ -94,6 +117,7 @@ endpoints, permissions, sessions, and recovery details.
 - [User guide](docs/user-guide.md)
 - [Configuration and custom agents](docs/configuration.md)
 - [Live AI, permissions, sessions, and recovery](docs/live-ai.md)
+- [Release process](docs/releasing.md)
 - [Functional specification and feature status](MASTER.md)
 - [Architecture and delivery roadmap](Masterplan.md)
 - [Contributor/agent conventions](AGENTS.md)
