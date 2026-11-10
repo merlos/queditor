@@ -1,0 +1,25 @@
+:root {
+  --sl-color-accent-low: #233315;
+  --sl-color-accent: #9bd653;
+  --sl-color-accent-high: #dfffb6;
+  --sl-color-bg: #0b0d0a;
+  --sl-color-bg-nav: rgba(11, 13, 10, 0.92);
+  --sl-color-bg-sidebar: #0e110d;
+  --sl-color-hairline: #292f25;
+  --sl-font: Inter, ui-sans-serif, system-ui, sans-serif;
+  --sl-font-mono: "JetBrains Mono", "SFMono-Regular", Consolas, monospace;
+}
+
+html[data-theme='light'] {
+  --sl-color-accent-low: #e3f7c7;
+  --sl-color-accent: #4e7e17;
+  --sl-color-accent-high: #243b0d;
+}
+
+.site-title {
+  letter-spacing: -0.03em;
+}
+
+.content-panel + .content-panel {
+  border-top-color: var(--sl-color-hairline);
+}

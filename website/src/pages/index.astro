@@ -1,0 +1,117 @@
+---
+const base = import.meta.env.BASE_URL.endsWith('/') ? import.meta.env.BASE_URL : `${import.meta.env.BASE_URL}/`;
+const url = (path: string) => `${base}${path.replace(/^\//, '')}`;
+---
+
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width" />
+    <meta name="description" content="Queditor is a terminal editor where every AI edit waits for your review." />
+    <meta name="theme-color" content="#0a0c09" />
+    <meta property="og:title" content="Queditor — AI edits, on your terms" />
+    <meta property="og:description" content="A terminal editor where every AI edit waits for your review." />
+    <meta property="og:type" content="website" />
+    <meta property="og:url" content={new URL(base, Astro.site)} />
+    <meta name="twitter:card" content="summary" />
+    <link rel="canonical" href={new URL(base, Astro.site)} />
+    <link rel="icon" href={url('favicon.svg')} />
+    <title>Queditor — AI edits, on your terms</title>
+  </head>
+  <body>
+    <header class="nav wrap">
+      <a class="brand" href={base} aria-label="Queditor home">
+        <img src={url('favicon.svg')} alt="" />
+        <span>queditor</span>
+      </a>
+      <nav aria-label="Main navigation">
+        <a href={url('docs/')}>Docs</a>
+        <a href="https://github.com/merlos/queditor/releases">Downloads</a>
+        <a class="github" href="https://github.com/merlos/queditor">GitHub ↗</a>
+      </nav>
+    </header>
+
+    <main>
+      <section class="hero wrap">
+        <div class="hero-copy">
+          <p class="eyebrow"><span></span> A terminal editor with boundaries</p>
+          <h1>AI edits,<br /><em>on your terms.</em></h1>
+          <p class="lede">Write Markdown and text at terminal speed. Ask for help when you want it. Every suggested change waits in a diff until you explicitly accept it.</p>
+          <div class="actions">
+            <a class="primary" href="https://github.com/merlos/queditor/releases">Download Queditor <span>↓</span></a>
+            <a class="secondary" href={url('docs/')}>Read the docs →</a>
+          </div>
+          <p class="fine">Open source · Rust · Windows, Linux & macOS · Unsigned early release</p>
+        </div>
+
+        <div class="terminal-shell" aria-label="Illustration of Queditor reviewing an assistant edit">
+          <div class="terminal-top"><i></i><i></i><i></i><span>draft.md — queditor</span></div>
+          <div class="terminal">
+            <div class="editor-pane">
+              <div class="pane-label">EDITOR <b>draft.md</b></div>
+              <pre><span class="line">1</span> <strong># A better way to write</strong>
+<span class="line">2</span>
+<span class="line">3</span> Ideas should move quickly.
+<span class="line">4</span> <mark>But every change should stay yours.</mark>
+<span class="line">5</span>
+<span class="line">6</span> <span class="cursor"> </span></pre>
+            </div>
+            <div class="chat-pane">
+              <div class="pane-label">ASSISTANT <b>reviewer</b></div>
+              <p class="prompt">› Make this sharper without changing the meaning.</p>
+              <div class="proposal">
+                <small>PROPOSED EDIT</small>
+                <p class="minus">− But every change should stay yours.</p>
+                <p class="plus">+ Move fast. Keep the final say.</p>
+              </div>
+              <div class="review"><span>A</span> accept <span>R</span> reject</div>
+            </div>
+          </div>
+          <div class="status"><span>NORMAL</span><span>Ln 6, Col 1</span><span>mock · reviewer</span></div>
+        </div>
+      </section>
+
+      <section class="principles wrap">
+        <p class="section-kicker">BUILT FOR CONTROL</p>
+        <h2>Assistance without surrender.</h2>
+        <div class="cards">
+          <article><span>01</span><h3>Review every edit</h3><p>Assistant output becomes a staged proposal, never an automatic document mutation. Inspect the diff before accepting.</p></article>
+          <article><span>02</span><h3>Share context deliberately</h3><p>Only attached snapshots and approved tool results go to a live provider. Stale context cannot overwrite newer work.</p></article>
+          <article><span>03</span><h3>Choose your model</h3><p>Use offline mock mode, local Ollama, or supported cloud providers through one consistent review workflow.</p></article>
+        </div>
+      </section>
+
+      <section class="workflow wrap">
+        <div><p class="section-kicker">ONE SAFE LOOP</p><h2>Attach. Ask.<br />Review. Decide.</h2></div>
+        <ol>
+          <li><b>01</b><div><strong>Select and attach</strong><p>Pin the exact text you want the assistant to see.</p></div></li>
+          <li><b>02</b><div><strong>Ask for a revision</strong><p>Keep editing while the response streams.</p></div></li>
+          <li><b>03</b><div><strong>Inspect the proposal</strong><p>Queditor presents additions and deletions as a focused diff.</p></div></li>
+          <li><b>04</b><div><strong>Accept or reject</strong><p>Your document changes only after an explicit review action.</p></div></li>
+        </ol>
+      </section>
+
+      <section class="cta wrap">
+        <p class="section-kicker">EARLY PROTOTYPE</p>
+        <h2>Keep the speed.<br />Keep the final say.</h2>
+        <p>Try Queditor today, or explore the documentation to understand its privacy and safety model.</p>
+        <div class="actions"><a class="primary" href="https://github.com/merlos/queditor/releases">Get the latest release</a><a class="secondary" href={url('docs/live-ai/')}>Privacy & permissions →</a></div>
+      </section>
+    </main>
+
+    <footer class="wrap"><span>Queditor · MIT licensed</span><span>Built in Rust for the terminal.</span></footer>
+  </body>
+</html>
+
+<style>
+  :global(*){box-sizing:border-box} :global(html){scroll-behavior:smooth} :global(body){margin:0;background:#0a0c09;color:#f2f4ed;font-family:Inter,ui-sans-serif,system-ui,sans-serif} :global(a){color:inherit;text-decoration:none}
+  body:before{content:"";position:fixed;inset:0;pointer-events:none;opacity:.035;background-image:url("data:image/svg+xml,%3Csvg viewBox='0 0 180 180' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='.9' numOctaves='4' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)' opacity='.8'/%3E%3C/svg%3E")}
+  .wrap{width:min(1180px,calc(100% - 40px));margin:auto}.nav{height:84px;display:flex;align-items:center;justify-content:space-between;border-bottom:1px solid #252a21}.brand{display:flex;align-items:center;gap:11px;font:600 19px 'JetBrains Mono'}.brand img{width:34px}.nav nav{display:flex;align-items:center;gap:32px;color:#aab0a2;font-size:14px}.nav a:hover{color:#c8f98c}.nav .github{border:1px solid #363d31;padding:10px 15px;color:#e4e8de}
+  .hero{min-height:760px;padding:110px 0 120px;display:grid;grid-template-columns:.82fr 1.18fr;gap:65px;align-items:center}.eyebrow,.section-kicker{font:600 11px 'JetBrains Mono';letter-spacing:.14em;color:#a8db69}.eyebrow span{display:inline-block;width:7px;height:7px;border-radius:50%;background:#a8db69;box-shadow:0 0 14px #a8db69;margin-right:7px}.hero h1{font-size:clamp(52px,6vw,86px);line-height:.96;letter-spacing:-.065em;margin:22px 0 28px}.hero h1 em{font-style:normal;color:#b9ef78}.lede{font-size:18px;line-height:1.65;color:#aeb4a8;max-width:590px}.actions{display:flex;align-items:center;gap:13px;margin-top:36px}.primary,.secondary{display:inline-flex;align-items:center;gap:24px;padding:15px 20px;font:600 13px 'JetBrains Mono'}.primary{color:#11150d;background:#b8ee77}.primary:hover{background:#d1ffa0}.secondary{border:1px solid #343a30;color:#dce1d6}.secondary:hover{border-color:#b8ee77;color:#b8ee77}.fine{font:400 10px 'JetBrains Mono';color:#687063;margin-top:20px}
+  .terminal-shell{border:1px solid #3a4234;background:#11140f;box-shadow:0 35px 90px #0009;transform:perspective(1200px) rotateY(-2deg)}.terminal-top{height:42px;border-bottom:1px solid #31372d;display:flex;align-items:center;gap:7px;padding:0 14px;color:#70776b;font:10px 'JetBrains Mono'}.terminal-top i{width:8px;height:8px;border-radius:50%;background:#3f463a}.terminal-top span{margin:auto}.terminal{height:390px;display:grid;grid-template-columns:1.03fr .97fr;font-family:'JetBrains Mono';font-size:11px}.editor-pane,.chat-pane{padding:17px;overflow:hidden}.editor-pane{border-right:1px solid #30362c}.pane-label{font-size:9px;letter-spacing:.11em;color:#6e7669;border-bottom:1px solid #272c24;padding-bottom:11px}.pane-label b{float:right;color:#aeb5a7;font-weight:400}.editor-pane pre{font:11px/2 'JetBrains Mono';color:#aeb4a8;margin-top:22px}.line{display:inline-block;width:18px;color:#485044}.editor-pane strong{color:#d7f5b2}.editor-pane mark{background:#2a3d1d;color:#c5ed95}.cursor{border-left:2px solid #b8ee77}.prompt{color:#cad0c5;line-height:1.7;margin:20px 0}.proposal{background:#0b0e0a;border:1px solid #30372c;padding:14px;margin-top:35px}.proposal small{color:#737c6d;letter-spacing:.12em}.proposal p{margin:12px 0 0;white-space:nowrap}.minus{color:#d87979;background:#3d1e1e77}.plus{color:#b8e684;background:#21381977}.review{margin-top:28px;color:#737a6e}.review span{color:#c9ef9a;border:1px solid #4a5540;padding:3px 6px;margin-left:10px}.status{height:28px;background:#a9dc6a;color:#15200d;display:flex;align-items:center;justify-content:space-between;padding:0 12px;font:600 9px 'JetBrains Mono'}
+  .principles{padding:115px 0;border-top:1px solid #252a21}.principles h2,.workflow h2,.cta h2{font-size:clamp(38px,5vw,64px);letter-spacing:-.05em;line-height:1.05;margin:18px 0 55px}.cards{display:grid;grid-template-columns:repeat(3,1fr);border-top:1px solid #30362c}.cards article{padding:36px 38px 10px 0}.cards article+article{border-left:1px solid #30362c;padding-left:38px}.cards span{font:11px 'JetBrains Mono';color:#8ec751}.cards h3{font-size:20px;margin:35px 0 14px}.cards p,.cta>p{color:#92998e;line-height:1.7;font-size:15px}
+  .workflow{padding:115px 0;display:grid;grid-template-columns:1fr 1fr;gap:100px;border-top:1px solid #252a21}.workflow ol{list-style:none;margin:0;padding:0}.workflow li{display:flex;gap:28px;padding:26px 0;border-bottom:1px solid #30362c}.workflow li b{font:11px 'JetBrains Mono';color:#91c854}.workflow strong{font-size:17px}.workflow p{margin:7px 0 0;color:#838b7f;font-size:14px}.cta{text-align:center;padding:140px 20px;border-top:1px solid #252a21}.cta h2{margin-bottom:24px}.cta>p{max-width:600px;margin:auto}.cta .actions{justify-content:center}footer{height:100px;border-top:1px solid #252a21;display:flex;align-items:center;justify-content:space-between;color:#656c61;font:10px 'JetBrains Mono'}
+  @media(max-width:900px){.hero{grid-template-columns:1fr;padding-top:80px}.terminal-shell{transform:none}.workflow{grid-template-columns:1fr;gap:20px}.cards{grid-template-columns:1fr}.cards article+article{border-left:0;border-top:1px solid #30362c;padding-left:0}.nav nav a:not(.github){display:none}}
+  @media(max-width:580px){.wrap{width:min(100% - 26px,1180px)}.hero{padding:60px 0 80px}.hero h1{font-size:54px}.actions{align-items:stretch;flex-direction:column}.actions a{justify-content:center}.terminal{height:auto;grid-template-columns:1fr}.editor-pane{border-right:0;border-bottom:1px solid #30362c}.chat-pane{min-height:300px}.principles,.workflow{padding:80px 0}.nav .github{padding:9px}.cta{padding:90px 13px}footer{flex-direction:column;justify-content:center;gap:10px}}
+</style>

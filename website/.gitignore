@@ -1,0 +1,7 @@
+node_modules/
+.astro/
+dist/
+src/content/docs/docs/user-guide.md
+src/content/docs/docs/configuration.md
+src/content/docs/docs/live-ai.md
+src/content/docs/docs/releasing.md

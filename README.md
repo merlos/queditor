@@ -3,6 +3,8 @@
 A Rust terminal Markdown/text editor with a side-by-side or stacked chat pane
 and explicit review of assistant edits.
 
+**Website and documentation:** <https://merlos.github.io/queditor/>
+
 **Early prototype:** offline mock mode is the default. Live AI uses
 [`genai`](https://github.com/jeremychone/rust-genai), a multi-provider Rust library
 supporting OpenAI, Anthropic, Gemini, Ollama, OpenRouter, Groq, and more.
@@ -121,6 +123,9 @@ endpoints, permissions, sessions, and recovery details.
 - [Functional specification and feature status](MASTER.md)
 - [Architecture and delivery roadmap](Masterplan.md)
 - [Contributor/agent conventions](AGENTS.md)
+
+The website renders the files in `docs/` as its canonical documentation source;
+see [`website/README.md`](website/README.md) for local preview and deployment.
 
 ## Development
 

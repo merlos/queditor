@@ -19,6 +19,8 @@ library. Never imply mock responses are live AI or every provider is account-tes
 - `src/storage.rs`: private versioned recovery/session/permission records.
 - `src/ui.rs`: rendering and layout; do not perform filesystem/network I/O here.
 - `src/lib.rs`: reusable modules for tests and future clients.
+- `website/`: Astro/Starlight marketing and documentation site; `docs/` remains
+  the canonical Markdown source and is copied at build time.
 
 Keep document semantics independent of terminal rendering. Extract modules as
 they acquire real complexity; do not create empty placeholder hierarchies.
@@ -55,6 +57,8 @@ cargo test
 cargo run -- --check
 python3 tests/terminal_smoke.py
 python3 tests/release_pipeline.py
+npm --prefix website ci
+npm --prefix website run build
 ```
 
 Add regression tests for bug fixes. Prioritize Unicode, data-loss prevention,

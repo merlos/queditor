@@ -1,0 +1,31 @@
+---
+title: Documentation
+description: Install Queditor and learn its explicit-review editing workflow.
+---
+
+Queditor is a terminal Markdown and text editor with an integrated assistant.
+Assistant changes are always staged as proposals: inspect the diff, accept or
+reject it, and save only when you choose.
+
+:::caution[Early prototype]
+Offline mock mode is the default. Live AI requires provider configuration, and
+the downloadable binaries are currently unsigned.
+:::
+
+## Start here
+
+- Follow the [user guide](./user-guide/) for editing, files, chat, and proposal review.
+- Read [configuration](./configuration/) to choose a theme, keybindings, and models.
+- Review [live AI and privacy](./live-ai/) before connecting a provider.
+
+## Install from source
+
+With a current stable Rust toolchain:
+
+```sh
+cargo install --git https://github.com/merlos/queditor
+queditor document.md
+```
+
+You can also download an archive from [GitHub Releases](https://github.com/merlos/queditor/releases).
+Verify its SHA-256 checksum before running it.

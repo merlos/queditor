@@ -71,4 +71,5 @@ still an early prototype: provider-account compatibility, stronger terminal/sign
 testing, OS clipboard, full Markdown parsing, wrapping/indent controls, custom
 themes/key chords, and large-file latency remain unfinished. Native unsigned
 release archives and checksums are automated; signing, notarization, and package-
-manager formats remain future work.
+manager formats remain future work. The marketing site and searchable Markdown
+documentation are automatically deployed to GitHub Pages.

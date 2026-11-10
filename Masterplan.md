@@ -117,6 +117,8 @@ Silicon macOS are implemented. Remaining: signed/notarized artifacts, package-ma
 formats, clipboard support, large-file benchmarks, supported-terminal matrix,
 broader signal/terminal compatibility, accessibility and complete release coverage.
 Unix shutdown signals now checkpoint interrupted work and restore terminal state.
+The Astro/Starlight marketing and documentation site deploys independently to
+GitHub Pages, with repository `docs/` Markdown kept as its canonical content.
 
 Gate: a new user can install, configure a provider, edit, attach context, approve
 reads, request/review a revision, undo it, save, and recover interrupted work using
