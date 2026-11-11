@@ -270,6 +270,7 @@ mod tests {
                 role: "you".into(),
                 text: "prompt".into(),
                 agent: None,
+                model: None,
             }],
             history: vec![ChatMessage::user("prompt")],
             model: "mock".into(),

@@ -83,6 +83,13 @@ comprehensive key validation, hot reload, and richer configuration merging.
 
 Composer, slash suggestions, scrollback, agent registry, session reset,
 selection/document snapshots, and local mock edit demonstrations.
+The editor/prompt/submitted messages use lighter borderless theme surfaces; the
+prompt identifies agent/model, and response footers use per-message model metadata
+captured at response creation and preserved by optional session persistence.
+Chat reply rendering now uses `pulldown-cmark` source offsets for Markdown colors,
+including streamed fragments and nested styles across Unicode-aware soft wraps.
+The editor's existing lightweight source highlighting remains separate; neither
+renderer performs link/image fetching or language-specific code highlighting.
 
 Live streaming/tool integration, context budgets and optional persistent sessions
 have now been added. Argument completion and broader chat-interaction parity remain.

@@ -67,6 +67,9 @@ pub struct Message {
     pub text: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub agent: Option<String>,
+    /// Model selected when this response started; never infer it on restoration.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
 }
 #[derive(Clone)]
 pub struct Attachment {
@@ -370,6 +373,11 @@ impl App {
             text: text.into(),
             agent: matches!(role, "assistant" | "mock")
                 .then(|| self.agents[self.agent].name.clone()),
+            model: match role {
+                "assistant" => Some(self.config.model.clone()),
+                "mock" => Some("mock".into()),
+                _ => None,
+            },
         });
         self.follow_chat = true;
     }

@@ -30,6 +30,8 @@ file; subsequent agent edits save that file. `recovery: true` also
 requires a durable pre-edit snapshot before auto-save and retains it after Keep/exit;
 `recovery: false` explicitly disables that safeguard, not automatic saving.
 `/theme daylight` changes the theme for the current run only.
+Both themes include a lighter surface for the borderless editor, prompt, and
+submitted messages; agent replies use the standard background.
 
 ## Providers and credentials
 

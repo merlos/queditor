@@ -6,9 +6,9 @@ use crate::{
 use ratatui::{
     Frame,
     layout::{Constraint, Direction, Layout, Rect},
-    style::{Modifier, Style},
+    style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, Clear, Paragraph},
+    widgets::{Block, Borders, Clear, Padding, Paragraph},
 };
 use std::ops::Range;
 use unicode_segmentation::UnicodeSegmentation;
@@ -70,17 +70,12 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
         .and_then(|p| p.file_name())
         .map(|p| p.to_string_lossy().into_owned())
         .unwrap_or_else(|| "[Untitled]".into());
-    let editor_block = pane(
-        &format!(
-            " {}{} ",
-            safe(&name),
-            if app.document.dirty() { " *" } else { "" }
-        ),
-        app.focus == Focus::Editor,
-        app,
-    );
+    let editor_block = pane("", app.focus == Focus::Editor, app);
     app.editor_area = editor_block.inner(panels[0]);
-    frame.render_widget(editor_block, panels[0]);
+    frame.render_widget(
+        editor_block.style(Style::default().bg(theme.surface).fg(theme.fg)),
+        panels[0],
+    );
     editor(frame, app);
     if app.explorer.is_some() {
         explorer(frame, app);
@@ -89,15 +84,11 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
     }
     let (row, col) = app.document.line_column();
     let status = format!(
-        " {}:{} · {} · {}",
+        " {}{} · {}:{}",
+        safe(&name),
+        if app.document.dirty() { " *" } else { "" },
         row + 1,
         col + 1,
-        if app.focus == Focus::Editor {
-            "EDITOR"
-        } else {
-            "CHAT"
-        },
-        safe(&app.agents[app.agent].name),
     );
     let level = match app.level {
         Level::Info => ("INFO", theme.muted),
@@ -157,9 +148,9 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
 
 fn pane(title: &str, focused: bool, app: &App) -> Block<'static> {
     Block::default()
-        .borders(Borders::ALL)
+        .padding(Padding::new(1, 1, 0, 1))
         .title(title.to_owned())
-        .border_style(Style::default().fg(if focused {
+        .title_style(Style::default().fg(if focused {
             app.theme.accent
         } else {
             app.theme.muted
@@ -526,9 +517,9 @@ fn review_editor(frame: &mut Frame, app: &mut App) {
                     ChangeTag::Equal => app.theme.fg,
                 };
                 let background = if tag == ChangeTag::Equal {
-                    app.theme.bg
+                    app.theme.surface
                 } else {
-                    diff_background(app.theme.bg, color)
+                    diff_background(app.theme.surface, color)
                 };
                 let background = if hunk == Some(review.active) {
                     diff_background(background, app.theme.yellow)
@@ -761,20 +752,14 @@ fn review_editor(frame: &mut Frame, app: &mut App) {
 }
 
 fn chat(frame: &mut Frame, app: &mut App) {
-    let block = pane(
-        match app.agent_mode() {
-            AgentMode::Chat => " Chat ",
-            AgentMode::Agent => " Agent ",
-        },
-        app.focus == Focus::Chat,
-        app,
-    );
+    let block = pane("", app.focus == Focus::Chat, app).padding(Padding::new(1, 1, 0, 0));
     let inside = block.inner(app.chat_area);
     frame.render_widget(block, app.chat_area);
     let composer_width = usize::from(inside.width.saturating_sub(2)).max(1);
-    let composer_height = (composer_rows(&app.composer, composer_width).len() as u16 + 2)
-        .clamp(3, 6)
-        .min(inside.height.saturating_sub(1));
+    let composer_height = (composer_rows(&app.composer, composer_width).len() as u16 + 3)
+        .clamp(4, 7)
+        .min(inside.height);
+    let hint_height = u16::from(inside.height > composer_height);
     let error_lines = if matches!(app.level, Level::Error) {
         wrapped(
             &format!("ERROR: {}", safe(&app.status)),
@@ -784,13 +769,13 @@ fn chat(frame: &mut Frame, app: &mut App) {
         vec![]
     };
     let error_height = error_lines.len().min(3) as u16;
-    let error_height = error_height.min(inside.height.saturating_sub(composer_height + 2));
+    let error_height =
+        error_height.min(inside.height.saturating_sub(composer_height + hint_height));
     let areas = Layout::vertical([
         Constraint::Min(0),
         Constraint::Length(error_height),
-        Constraint::Length(1),
+        Constraint::Length(hint_height),
         Constraint::Length(composer_height),
-        Constraint::Length(1),
     ])
     .split(inside);
     let width = usize::from(areas[0].width).max(1);
@@ -806,11 +791,6 @@ fn chat(frame: &mut Frame, app: &mut App) {
     frame.render_widget(
         Paragraph::new(lines.into_iter().skip(app.chat_scroll).collect::<Vec<_>>()),
         areas[0],
-    );
-    frame.render_widget(
-        Paragraph::new(format!("Model: {}", safe(&app.config.model)))
-            .style(Style::default().fg(app.theme.muted)),
-        areas[4],
     );
     frame.render_widget(
         Paragraph::new(error_lines.join("\n")).style(Style::default().fg(app.theme.red)),
@@ -837,12 +817,44 @@ fn chat(frame: &mut Frame, app: &mut App) {
         areas[2],
     );
     let input = Block::default()
-        .borders(Borders::ALL)
-        .title(" Prompt ")
-        .border_style(Style::default().fg(app.theme.muted));
+        // Preserve an editable row on tiny terminals; otherwise separate the
+        // prompt text from its identity footer with a full blank surface row.
+        .padding(Padding::new(
+            1,
+            1,
+            u16::from(areas[3].height > 3),
+            if areas[3].height > 2 { 2 } else { 1 },
+        ))
+        .style(Style::default().bg(app.theme.surface).fg(app.theme.fg));
     let input_area = input.inner(areas[3]);
     app.composer_area = input_area;
     frame.render_widget(input, areas[3]);
+    if areas[3].height > 0 {
+        let identity = Line::from(vec![
+            Span::styled(safe(&app.agents[app.agent].name), speaker_style(false, app)),
+            Span::styled(
+                match app.agent_mode() {
+                    AgentMode::Chat => " Chat",
+                    AgentMode::Agent => " Agent",
+                },
+                Style::default().fg(app.theme.muted),
+            ),
+            Span::styled(
+                format!(" · {}", model_label(&app.config.model)),
+                Style::default().fg(app.theme.muted),
+            ),
+        ]);
+        frame.render_widget(
+            Paragraph::new(identity)
+                .style(Style::default().fg(app.theme.muted).bg(app.theme.surface)),
+            Rect::new(
+                areas[3].x + 1,
+                areas[3].bottom() - 1,
+                areas[3].width.saturating_sub(2),
+                1,
+            ),
+        );
+    }
     let rows = composer_rows(&app.composer, usize::from(input_area.width).max(1));
     let cursor_row = rows
         .iter()
@@ -910,9 +922,149 @@ fn chat(frame: &mut Frame, app: &mut App) {
 
 const SPINNER_FRAMES: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 
+/// Interpolate around the RGB hue wheel independently of the glyph cycle.
+fn spinner_color(frame: usize) -> Color {
+    let phase = frame % 120;
+    let rising = ((phase % 20) * 255 / 20) as u8;
+    let falling = 255 - rising;
+    match phase / 20 {
+        0 => Color::Rgb(255, rising, 0),
+        1 => Color::Rgb(falling, 255, 0),
+        2 => Color::Rgb(0, 255, rising),
+        3 => Color::Rgb(0, falling, 255),
+        4 => Color::Rgb(rising, 0, 255),
+        _ => Color::Rgb(255, 0, falling),
+    }
+}
+
+/// Display namespaces with one colon, preserving size tags within model names.
+fn model_label(model: &str) -> String {
+    if model == "mock" {
+        "mock (offline)".into()
+    } else if let Some((provider, name)) = model.split_once("::") {
+        format!("{}:{}", safe(provider), safe(name))
+    } else {
+        safe(model)
+    }
+}
+
+fn speaker_style(submitted: bool, app: &App) -> Style {
+    Style::default()
+        .fg(if submitted {
+            app.theme.green
+        } else {
+            app.theme.accent
+        })
+        .add_modifier(Modifier::BOLD)
+}
+
+/// Color Markdown source without hiding syntax, fetching links, or interpreting
+/// terminal escapes. Parser offsets let nested styles survive soft wrapping and
+/// avoid treating escaped markers or intraword underscores as emphasis.
+fn markdown_reply_lines(text: &str, width: usize, app: &App) -> Vec<Line<'static>> {
+    use pulldown_cmark::{Event, Options, Parser, Tag};
+    let text = safe(text);
+    let base = Style::default().fg(app.theme.fg).bg(app.theme.bg);
+    let mut highlights = Parser::new_ext(
+        &text,
+        Options::ENABLE_STRIKETHROUGH | Options::ENABLE_TABLES,
+    )
+    .into_offset_iter()
+    .filter_map(|(event, range)| {
+        let style = match event {
+            Event::Start(Tag::Heading { .. } | Tag::Strong) => Style::default()
+                .fg(app.theme.accent)
+                .add_modifier(Modifier::BOLD),
+            Event::Start(Tag::Emphasis) => Style::default()
+                .fg(app.theme.yellow)
+                .add_modifier(Modifier::ITALIC),
+            Event::Start(Tag::CodeBlock(_)) | Event::Code(_) => {
+                Style::default().fg(app.theme.green)
+            }
+            Event::Start(Tag::Link { .. } | Tag::Image { .. }) => Style::default()
+                .fg(app.theme.accent)
+                .add_modifier(Modifier::UNDERLINED),
+            Event::Start(Tag::BlockQuote(_)) | Event::Rule => Style::default().fg(app.theme.muted),
+            Event::Start(Tag::Strikethrough) => Style::default()
+                .fg(app.theme.muted)
+                .add_modifier(Modifier::CROSSED_OUT),
+            _ => return None,
+        };
+        Some((range, style))
+    })
+    .collect::<Vec<_>>();
+    // Stable ordering retains parent-before-child precedence at equal offsets.
+    highlights.sort_by_key(|(range, _)| range.start);
+    let mut highlights = highlights.into_iter().peekable();
+    let mut active: Vec<(Range<usize>, Style)> = vec![];
+    let mut lines = vec![];
+    let mut offset = 0;
+    let width = width.max(1);
+    for raw in text.split('\n') {
+        let mut spans = vec![];
+        let mut column = 0;
+        for (byte, grapheme) in raw.grapheme_indices(true) {
+            let position = offset + byte;
+            while highlights
+                .peek()
+                .is_some_and(|(range, _)| range.start <= position)
+            {
+                active.push(highlights.next().unwrap());
+            }
+            active.retain(|(range, _)| range.end > position);
+            let style = active
+                .iter()
+                .fold(base, |style, (_, overlay)| style.patch(*overlay));
+            let mut w = grapheme_width(grapheme, column);
+            if column > 0 && column + w > width {
+                lines.push(Line::from(std::mem::take(&mut spans)));
+                column = 0;
+                w = grapheme_width(grapheme, 0);
+            }
+            spans.push(Span::styled(
+                if grapheme == "\t" {
+                    " ".repeat(w.min(width))
+                } else {
+                    grapheme.into()
+                },
+                style,
+            ));
+            column += w;
+        }
+        lines.push(Line::from(spans));
+        offset += raw.len() + 1;
+    }
+    lines
+}
+
 fn chat_lines(app: &App, width: usize) -> Vec<Line<'static>> {
     let mut lines = vec![];
     for (index, message) in app.messages.iter().enumerate() {
+        let submitted = message.role == "you";
+        let background = if submitted {
+            app.theme.surface
+        } else {
+            app.theme.bg
+        };
+        let content_width = if submitted {
+            width.saturating_sub(2).max(1)
+        } else {
+            width
+        };
+        let padded = |text: String| {
+            if submitted {
+                let padding = width.saturating_sub(display_width(&text) + 1);
+                format!(" {text}{}", " ".repeat(padding))
+            } else {
+                text
+            }
+        };
+        if submitted {
+            lines.push(Line::styled(
+                " ".repeat(width),
+                Style::default().bg(background),
+            ));
+        }
         let name = match message.role.as_str() {
             "you" => "You",
             "assistant" | "mock" => message
@@ -922,14 +1074,11 @@ fn chat_lines(app: &App, width: usize) -> Vec<Line<'static>> {
             role => role,
         };
         let heading = format!("{}:", safe(name));
-        lines.extend(wrapped(&heading, width).into_iter().map(|line| {
-            Line::styled(
-                line,
-                Style::default()
-                    .fg(app.theme.accent)
-                    .add_modifier(Modifier::BOLD),
-            )
-        }));
+        lines.extend(
+            wrapped(&heading, content_width).into_iter().map(|line| {
+                Line::styled(padded(line), speaker_style(submitted, app).bg(background))
+            }),
+        );
         if app.active_message_index() == Some(index)
             && let Some(label) = app.activity_label()
         {
@@ -940,10 +1089,54 @@ fn chat_lines(app: &App, width: usize) -> Vec<Line<'static>> {
             lines.extend(
                 wrapped(&activity, width)
                     .into_iter()
-                    .map(|line| Line::styled(line, Style::default().fg(app.theme.muted))),
+                    .enumerate()
+                    .map(|(row, line)| {
+                        if row == 0 {
+                            let glyph_end = line.chars().next().map_or(0, char::len_utf8);
+                            Line::from(vec![
+                                Span::styled(
+                                    line[..glyph_end].to_owned(),
+                                    Style::default().fg(spinner_color(app.animation_frame)),
+                                ),
+                                Span::styled(
+                                    line[glyph_end..].to_owned(),
+                                    Style::default().fg(app.theme.muted),
+                                ),
+                            ])
+                        } else {
+                            Line::styled(line, Style::default().fg(app.theme.muted))
+                        }
+                    }),
             );
         }
-        lines.extend(wrapped(&message.text, width).into_iter().map(Line::from));
+        if matches!(message.role.as_str(), "assistant" | "mock") {
+            lines.extend(markdown_reply_lines(&message.text, content_width, app));
+        } else {
+            lines.extend(
+                wrapped(&message.text, content_width)
+                    .into_iter()
+                    .map(|line| {
+                        Line::styled(
+                            padded(line),
+                            Style::default().fg(app.theme.fg).bg(background),
+                        )
+                    }),
+            );
+        }
+        if matches!(message.role.as_str(), "assistant" | "mock")
+            && app.active_message_index() != Some(index)
+            && let Some(model) = &message.model
+        {
+            lines.extend(wrapped(&model_label(model), width).into_iter().map(|line| {
+                Line::styled(line, Style::default().fg(app.theme.muted).bg(app.theme.bg))
+            }));
+        }
+        if submitted {
+            lines.push(Line::styled(
+                " ".repeat(width),
+                Style::default().bg(background),
+            ));
+        }
         lines.push(Line::from(""));
     }
     lines
@@ -1979,24 +2172,375 @@ mod tests {
             .iter()
             .map(ToString::to_string)
             .collect::<Vec<_>>();
-        assert_eq!(lines[0], "You:");
-        assert_eq!(lines[3], "Planner:");
-        assert_eq!(lines[6], "Blogger:");
+        let headings = lines
+            .iter()
+            .filter(|line| line.trim_end().ends_with(':'))
+            .map(|line| line.trim())
+            .collect::<Vec<_>>();
+        assert_eq!(headings, ["You:", "Planner:", "Blogger:"]);
         let restored: crate::app::Message =
             serde_json::from_str(r#"{"role":"assistant","text":"Old response"}"#).unwrap();
         assert!(restored.agent.is_none());
+        assert!(restored.model.is_none());
         app.messages.push(restored);
-        assert_eq!(chat_lines(&app, 80)[9].to_string(), "Blogger:");
+        let lines = chat_lines(&app, 80);
+        assert_eq!(lines[lines.len() - 3].to_string(), "Blogger:");
         let restored: crate::app::Message =
             serde_json::from_str(&serde_json::to_string(&app.messages[1]).unwrap()).unwrap();
         assert_eq!(restored.agent.as_deref(), Some("Planner"));
+        assert_eq!(restored.model, app.messages[1].model);
     }
 
     #[test]
-    fn current_model_is_below_prompt_not_in_global_status() {
+    fn borderless_editor_and_prompt_use_lighter_surfaces_in_both_themes() {
+        for theme in ["mocha", "daylight"] {
+            for (width, height) in [(140, 40), (80, 30), (30, 10)] {
+                let mut app = App::new(None).unwrap();
+                app.theme = crate::config::Theme::named(theme);
+                app.agent = 0;
+                app.messages.clear();
+                app.focus = Focus::Chat;
+                app.compose_insert("hello 界👩‍💻");
+                let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+                terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+                let buffer = terminal.backend().buffer();
+                assert_ne!(app.theme.surface, app.theme.bg);
+                assert_eq!(
+                    buffer[(app.editor_area.x, app.editor_area.y)].bg,
+                    app.theme.surface
+                );
+                assert_eq!(
+                    buffer[(app.composer_area.x, app.composer_area.y)].bg,
+                    app.theme.surface
+                );
+                assert_eq!(
+                    buffer[(app.composer_area.x, app.composer_area.bottom())].bg,
+                    app.theme.surface
+                );
+                assert_eq!(buffer[(app.chat_area.x, app.chat_area.y)].bg, app.theme.bg);
+                assert!(
+                    buffer
+                        .content()
+                        .iter()
+                        .all(|cell| !["─", "│", "┌", "┐", "└", "┘"].contains(&cell.symbol()))
+                );
+                assert!(app.composer_area.height > 0);
+                let cursor = terminal.get_cursor_position().unwrap();
+                assert!(app.composer_area.contains(cursor));
+                assert!(cursor.x < width && cursor.y < height);
+            }
+        }
+    }
+
+    #[test]
+    fn submitted_messages_fill_lighter_rows_and_replies_keep_standard_background() {
+        for theme in ["mocha", "daylight"] {
+            let mut app = App::new(None).unwrap();
+            app.theme = crate::config::Theme::named(theme);
+            app.messages.clear();
+            app.config.model = "provider::model:26b".into();
+            app.message("you", "submitted 界👩‍💻\nsecond line");
+            app.message("assistant", "Agent reply");
+            let mut terminal = Terminal::new(TestBackend::new(40, 20)).unwrap();
+            terminal
+                .draw(|frame| {
+                    frame.render_widget(
+                        Paragraph::new(chat_lines(&app, 40))
+                            .style(Style::default().bg(app.theme.bg)),
+                        frame.area(),
+                    );
+                })
+                .unwrap();
+            let buffer = terminal.backend().buffer();
+            let rows = (0..20)
+                .map(|y| (0..40).map(|x| buffer[(x, y)].symbol()).collect::<String>())
+                .collect::<Vec<_>>();
+            let submitted = rows
+                .iter()
+                .position(|row| row.contains("submitted"))
+                .unwrap() as u16;
+            let reply = rows
+                .iter()
+                .position(|row| row.contains("Agent reply"))
+                .unwrap() as u16;
+            let footer = rows
+                .iter()
+                .position(|row| row.contains("provider:model:26b"))
+                .unwrap() as u16;
+            // Wide-glyph continuation cells are reset by Ratatui and not emitted
+            // separately; their background belongs to the leading glyph cell.
+            let mut x = 0;
+            while x < 40 {
+                assert_eq!(buffer[(x, submitted)].bg, app.theme.surface);
+                x += display_width(buffer[(x, submitted)].symbol()).max(1) as u16;
+            }
+            for x in 0..40 {
+                assert_eq!(buffer[(x, submitted + 1)].bg, app.theme.surface);
+                assert_eq!(buffer[(x, reply)].bg, app.theme.bg);
+                assert_eq!(buffer[(x, footer)].bg, app.theme.bg);
+            }
+            assert!(submitted < reply && reply < footer);
+        }
+    }
+
+    #[test]
+    fn response_footers_keep_original_model_and_mock_is_explicitly_offline() {
+        let mut app = App::new(None).unwrap();
+        app.messages.clear();
+        app.config.model = "provider::model:26b".into();
+        app.message("assistant", "first answer");
+        app.config.model = "other::different:8b".into();
+        app.message("mock", "offline demonstration");
+        let lines = chat_lines(&app, 80)
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>();
+        assert_eq!(lines[2], "provider:model:26b");
+        assert_eq!(lines[6], "mock (offline)");
+        assert!(!lines.iter().any(|line| line.contains("different:8b")));
+        let restored: crate::app::Message =
+            serde_json::from_str(&serde_json::to_string(&app.messages[0]).unwrap()).unwrap();
+        assert_eq!(restored.model.as_deref(), Some("provider::model:26b"));
+    }
+
+    #[test]
+    fn prompt_footer_has_blank_separator_and_panel_bottom_matches_editor() {
+        for theme in ["mocha", "daylight"] {
+            for (width, height) in [(140, 40), (124, 30), (124, 10), (80, 30), (30, 10)] {
+                for text in ["hello".into(), "wrapped 界👩‍💻\n".repeat(30)] {
+                    let mut app = App::new(None).unwrap();
+                    app.theme = crate::config::Theme::named(theme);
+                    app.focus = Focus::Chat;
+                    app.agent = 0;
+                    app.config.model = "mock".into();
+                    app.config.agent_modes.clear();
+                    app.messages.clear();
+                    app.compose_insert(&text);
+                    let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+                    terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+                    let buffer = terminal.backend().buffer();
+                    let footer_y = app.chat_area.bottom() - 1;
+                    let footer = (app.composer_area.x..app.composer_area.right())
+                        .map(|x| buffer[(x, footer_y)].symbol())
+                        .collect::<String>();
+                    assert!(footer.contains("Planner Chat · mock"));
+                    if width >= 80 {
+                        assert!(footer.contains("Planner Chat · mock (offline)"));
+                    }
+                    assert_eq!(footer_y, height - 3, "no spacing below the prompt panel");
+                    if width >= 124 {
+                        assert_eq!(footer_y, app.editor_area.bottom());
+                        assert_eq!(buffer[(app.editor_area.x, footer_y)].bg, app.theme.surface);
+                    }
+                    if (width, height) != (30, 10) {
+                        assert_eq!(app.composer_area.bottom() + 1, footer_y);
+                        for x in app.composer_area.x..app.composer_area.right() {
+                            let cell = &buffer[(x, footer_y - 1)];
+                            assert_eq!(cell.symbol(), " ");
+                            assert_eq!(cell.bg, app.theme.surface);
+                        }
+                    }
+                    assert!(app.composer_area.height > 0);
+                    assert!(
+                        app.composer_area
+                            .contains(terminal.get_cursor_position().unwrap())
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn chat_speakers_have_distinct_colors_and_prompt_agent_matches_reply() {
+        for theme in ["mocha", "daylight"] {
+            for agent in [0, 1] {
+                for width in [140, 80, 30] {
+                    let mut app = App::new(None).unwrap();
+                    app.theme = crate::config::Theme::named(theme);
+                    app.agent = agent;
+                    app.messages.clear();
+                    app.message("you", "hello");
+                    app.message("assistant", "reply");
+                    let mut terminal = Terminal::new(TestBackend::new(width, 60)).unwrap();
+                    terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+                    let buffer = terminal.backend().buffer();
+                    let heading_cell = |name: &str| {
+                        (app.chat_area.y..app.chat_area.bottom())
+                            .find_map(|y| {
+                                let row = (app.chat_area.x..app.chat_area.right())
+                                    .map(|x| buffer[(x, y)].symbol())
+                                    .collect::<String>();
+                                (row.trim() == format!("{name}:")).then(|| {
+                                    &buffer[(app.chat_area.x + row.find(name).unwrap() as u16, y)]
+                                })
+                            })
+                            .unwrap()
+                    };
+                    let you = heading_cell("You");
+                    let reply = heading_cell(&app.agents[agent].name);
+                    assert_eq!(you.fg, app.theme.green);
+                    assert_eq!(reply.fg, app.theme.accent);
+                    assert_ne!(you.fg, reply.fg);
+                    assert_eq!(you.bg, app.theme.surface);
+                    assert_eq!(reply.bg, app.theme.bg);
+                    let footer = &buffer[(app.composer_area.x, app.chat_area.bottom() - 1)];
+                    assert_eq!(footer.fg, reply.fg);
+                    assert_eq!(footer.bg, app.theme.surface);
+                    let model_x = app.composer_area.x + app.agents[agent].name.len() as u16 + 8;
+                    assert_eq!(
+                        buffer[(model_x, app.chat_area.bottom() - 1)].fg,
+                        app.theme.muted
+                    );
+                }
+            }
+        }
+    }
+
+    fn markdown_style_at(lines: &[Line<'_>], needle: &str) -> Style {
+        for line in lines {
+            if let Some(position) = line.to_string().find(needle) {
+                let mut offset = 0;
+                for span in &line.spans {
+                    if (offset..offset + span.content.len()).contains(&position) {
+                        return line.style.patch(span.style);
+                    }
+                    offset += span.content.len();
+                }
+            }
+        }
+        panic!("No Markdown span for {needle:?}");
+    }
+
+    #[test]
+    fn markdown_reply_colors_headings_emphasis_code_links_and_quotes_without_hiding_source() {
+        let text = "# Heading\nplain **bold** and *italic* and `inline`\n[link](https://example.invalid)\n> quote\n~~removed~~\n```rust\nlet code = \"**not bold**\";\n```\nafter";
+        for theme in ["mocha", "daylight"] {
+            let mut app = App::new(None).unwrap();
+            app.theme = crate::config::Theme::named(theme);
+            let lines = markdown_reply_lines(text, 200, &app);
+            assert_eq!(
+                lines
+                    .iter()
+                    .map(ToString::to_string)
+                    .collect::<Vec<_>>()
+                    .join("\n"),
+                text
+            );
+            for needle in ["Heading", "bold** and"] {
+                let style = markdown_style_at(&lines, needle);
+                assert_eq!(style.fg, Some(app.theme.accent));
+                assert!(style.add_modifier.contains(Modifier::BOLD));
+            }
+            let italic = markdown_style_at(&lines, "italic");
+            assert_eq!(italic.fg, Some(app.theme.yellow));
+            assert!(italic.add_modifier.contains(Modifier::ITALIC));
+            for needle in ["inline", "rust", "let code", "not bold"] {
+                let style = markdown_style_at(&lines, needle);
+                assert_eq!(style.fg, Some(app.theme.green));
+                assert!(!style.add_modifier.contains(Modifier::BOLD));
+            }
+            let link = markdown_style_at(&lines, "link");
+            assert_eq!(link.fg, Some(app.theme.accent));
+            assert!(link.add_modifier.contains(Modifier::UNDERLINED));
+            assert_eq!(markdown_style_at(&lines, "quote").fg, Some(app.theme.muted));
+            assert!(
+                markdown_style_at(&lines, "removed")
+                    .add_modifier
+                    .contains(Modifier::CROSSED_OUT)
+            );
+            assert_eq!(markdown_style_at(&lines, "after").fg, Some(app.theme.fg));
+            let nested = markdown_reply_lines("**bold *nested* text**", 80, &app);
+            let style = markdown_style_at(&nested, "nested");
+            assert_eq!(style.fg, Some(app.theme.yellow));
+            assert!(
+                style
+                    .add_modifier
+                    .contains(Modifier::BOLD | Modifier::ITALIC)
+            );
+            assert!(
+                lines
+                    .iter()
+                    .flat_map(|line| &line.spans)
+                    .all(|span| span.style.bg == Some(app.theme.bg))
+            );
+        }
+    }
+
+    #[test]
+    fn markdown_reply_wraps_unicode_and_handles_streamed_fragments_and_literal_markers() {
+        let app = App::new(None).unwrap();
+        let text = "**wrapped 界👩‍💻\tbold text and more words** plain";
+        for width in [8, 17, 40] {
+            let lines = markdown_reply_lines(text, width, &app);
+            assert_eq!(
+                lines.iter().map(ToString::to_string).collect::<String>(),
+                wrapped(text, width).concat()
+            );
+            assert!(lines.iter().all(|line| line.width() <= width));
+            assert!(lines.iter().skip(1).any(|line| {
+                line.spans
+                    .iter()
+                    .any(|span| span.style.add_modifier.contains(Modifier::BOLD))
+            }));
+        }
+        let incomplete = markdown_reply_lines("**unfinished", 80, &app);
+        assert_eq!(
+            markdown_style_at(&incomplete, "unfinished").fg,
+            Some(app.theme.fg)
+        );
+        let complete = markdown_reply_lines("**finished**", 80, &app);
+        assert!(
+            markdown_style_at(&complete, "finished")
+                .add_modifier
+                .contains(Modifier::BOLD)
+        );
+        let literal = markdown_reply_lines(r"plain snake_case_word and \*escaped\*", 80, &app);
+        for needle in ["case", "escaped"] {
+            let style = markdown_style_at(&literal, needle);
+            assert_eq!(style.fg, Some(app.theme.fg));
+            assert!(!style.add_modifier.contains(Modifier::ITALIC));
+        }
+        let escaped = markdown_reply_lines("\x1b[31mtext", 80, &app);
+        assert!(!escaped[0].to_string().contains('\x1b'));
+    }
+
+    #[test]
+    fn markdown_is_only_highlighted_for_bot_replies_and_does_not_leak_between_messages() {
+        let mut app = App::new(None).unwrap();
+        app.messages.clear();
+        app.message("you", "**user bold**");
+        app.message("system", "**system bold**");
+        app.message("assistant", "```\nopen code");
+        app.message("assistant", "plain reply");
+        app.message("mock", "**mock bold**");
+        let lines = chat_lines(&app, 80);
+        for needle in ["user bold", "system bold", "plain reply"] {
+            let style = markdown_style_at(&lines, needle);
+            assert_eq!(style.fg, Some(app.theme.fg));
+            assert!(!style.add_modifier.contains(Modifier::BOLD));
+        }
+        assert_eq!(
+            markdown_style_at(&lines, "user bold").bg,
+            Some(app.theme.surface)
+        );
+        assert_eq!(
+            markdown_style_at(&lines, "open code").fg,
+            Some(app.theme.green)
+        );
+        assert!(
+            markdown_style_at(&lines, "mock bold")
+                .add_modifier
+                .contains(Modifier::BOLD)
+        );
+    }
+
+    #[test]
+    fn agent_and_model_are_inside_prompt_not_in_global_status() {
         for (width, height) in [(140, 40), (80, 30), (30, 10)] {
             let mut app = App::new(None).unwrap();
-            app.config.model = "ollama::test".into();
+            app.agent = 0;
+            app.config.agent_modes.clear();
+            app.config.model = "ollama::test:26b".into();
             let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
             terminal.draw(|frame| draw(frame, &mut app)).unwrap();
             let buffer = terminal.backend().buffer();
@@ -2007,18 +2551,31 @@ mod tests {
             };
             assert!(
                 row(
-                    app.chat_area.bottom() - 2,
+                    app.chat_area.bottom() - 1,
                     app.chat_area.x + 1,
                     app.chat_area.right() - 1
                 )
-                .contains("Model: ollama::test")
+                .contains("Planner Chat · ollama:")
             );
+            if width >= 80 {
+                assert!(
+                    row(
+                        app.chat_area.bottom() - 1,
+                        app.chat_area.x + 1,
+                        app.chat_area.right() - 1
+                    )
+                    .contains("Planner Chat · ollama:test:26b")
+                );
+            }
             if app.composer_area.height > 0 {
-                assert!(app.composer_area.bottom() <= app.chat_area.bottom() - 3);
+                assert!(app.composer_area.bottom() < app.chat_area.bottom());
             }
             let status = row(height - 2, 0, width);
-            assert!(!status.contains("ollama::test"));
+            assert!(!status.contains("ollama:test:26b"));
             assert!(!status.contains(&app.config.theme));
+            assert!(!status.contains("Planner"));
+            assert!(!status.contains("EDITOR"));
+            assert!(!status.contains("CHAT"));
         }
     }
 
@@ -2060,28 +2617,91 @@ mod tests {
     }
 
     #[test]
-    fn headers_show_filename_once_and_only_assistant_mode() {
+    fn filename_is_in_status_and_mode_follows_agent_in_prompt_not_headers() {
         for (width, height) in [(140, 40), (80, 30), (30, 10)] {
             for (mode, title) in [(AgentMode::Chat, "Chat"), (AgentMode::Agent, "Agent")] {
-                let mut app = App::new(None).unwrap();
-                app.document.path = Some("draft.md".into());
-                app.document.insert("unsaved");
-                app.config
-                    .agent_modes
-                    .insert(app.agents[app.agent].name.clone(), mode);
-                let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
-                terminal.draw(|frame| draw(frame, &mut app)).unwrap();
-                let buffer = terminal.backend().buffer();
-                let row = |y, start, end| {
-                    (start..end)
-                        .map(|x| buffer[(x, y)].symbol())
-                        .collect::<String>()
-                };
-                assert!(row(0, 0, width).contains("draft.md *"));
-                let header = row(app.chat_area.y, app.chat_area.x, app.chat_area.right());
-                assert_eq!(header.trim_matches(['─', '┐', '┌', ' ']), title);
-                assert!(!row(height - 2, 0, width).contains("draft.md"));
+                for path in [None, Some("draft.md"), Some("界👩‍💻.md")] {
+                    let mut app = App::new(None).unwrap();
+                    app.agent = 0;
+                    app.config.model = "mock".into();
+                    app.document.path = path.map(Into::into);
+                    app.document.insert("unsaved");
+                    app.config
+                        .agent_modes
+                        .insert(app.agents[app.agent].name.clone(), mode);
+                    let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+                    terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+                    let buffer = terminal.backend().buffer();
+                    let row = |y, start, end| {
+                        let mut text = String::new();
+                        let mut x = start;
+                        while x < end {
+                            let symbol = buffer[(x, y)].symbol();
+                            text.push_str(symbol);
+                            x += display_width(symbol).max(1) as u16;
+                        }
+                        text
+                    };
+                    assert!(row(0, 0, width).trim().is_empty());
+                    let header = row(app.chat_area.y, app.chat_area.x, app.chat_area.right());
+                    assert!(header.trim().is_empty());
+                    let status = row(height - 2, 0, width);
+                    assert_eq!(
+                        status.trim(),
+                        format!("{} * · 1:8", path.unwrap_or("[Untitled]"))
+                    );
+                    assert!(!status.contains("CHAT"));
+                    assert!(!status.contains("EDITOR"));
+                    assert!(!status.contains(&app.agents[app.agent].name));
+                    let footer = row(
+                        app.chat_area.bottom() - 1,
+                        app.chat_area.x,
+                        app.chat_area.right(),
+                    );
+                    assert!(
+                        footer.contains(&format!("{} {title} · mock", app.agents[app.agent].name))
+                    );
+                    if width >= 80 {
+                        assert!(footer.contains("mock (offline)"));
+                    }
+                    app.document.undo();
+                    terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+                    let buffer = terminal.backend().buffer();
+                    let mut status = String::new();
+                    let mut x = 0;
+                    while x < width {
+                        let symbol = buffer[(x, height - 2)].symbol();
+                        status.push_str(symbol);
+                        x += display_width(symbol).max(1) as u16;
+                    }
+                    assert_eq!(
+                        status.trim(),
+                        format!("{} · 1:1", path.unwrap_or("[Untitled]"))
+                    );
+                }
             }
+        }
+    }
+
+    #[test]
+    fn spinner_colors_progress_smoothly_through_a_complete_rainbow() {
+        assert_eq!(spinner_color(0), Color::Rgb(255, 0, 0));
+        assert_eq!(spinner_color(20), Color::Rgb(255, 255, 0));
+        assert_eq!(spinner_color(40), Color::Rgb(0, 255, 0));
+        assert_eq!(spinner_color(60), Color::Rgb(0, 255, 255));
+        assert_eq!(spinner_color(80), Color::Rgb(0, 0, 255));
+        assert_eq!(spinner_color(100), Color::Rgb(255, 0, 255));
+        assert_eq!(spinner_color(120), spinner_color(0));
+        for frame in 0..120 {
+            let Color::Rgb(r, g, b) = spinner_color(frame) else {
+                panic!()
+            };
+            let Color::Rgb(next_r, next_g, next_b) = spinner_color(frame + 1) else {
+                panic!()
+            };
+            assert!(r.abs_diff(next_r) <= 13);
+            assert!(g.abs_diff(next_g) <= 13);
+            assert!(b.abs_diff(next_b) <= 13);
         }
     }
 

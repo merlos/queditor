@@ -14,6 +14,17 @@ discovery. `/models` opens a selector containing configured and discovered model
 Discovery uses the provider's model-list API and can fail even when manual model use
 works; in that case enter the documented model ID directly.
 
+The lighter prompt panel shows the current agent, mode, and model, for example
+`Planner Chat · ollama:gemma3:26b`. Completed replies end with their original model label,
+even after selecting a different model. Model identifiers still use `provider::model`
+in commands and configuration; only the display uses a single provider colon.
+Optional session persistence preserves this per-response metadata; older sessions
+without it do not acquire guessed model labels. Mock output is labeled `mock (offline)`.
+Agent names use the same accent color in the chat heading and prompt footer;
+`You:` uses a distinct green color. Replies have source-preserving Markdown colors
+for headings, emphasis, code, links, quotes, and strikethrough. Streaming fragments
+are reparsed as they arrive; rendering never fetches links/images or executes code.
+
 Startup configuration example:
 
 ```yaml

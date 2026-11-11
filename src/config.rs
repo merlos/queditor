@@ -341,6 +341,8 @@ impl Bindings {
 #[derive(Clone, Copy)]
 pub struct Theme {
     pub bg: Color,
+    /// Raised, borderless editor/input/user-message surface.
+    pub surface: Color,
     pub fg: Color,
     pub muted: Color,
     pub accent: Color,
@@ -354,6 +356,7 @@ impl Theme {
         if name == "daylight" {
             Self {
                 bg: Color::Rgb(250, 248, 240),
+                surface: Color::Rgb(255, 254, 250),
                 fg: Color::Rgb(40, 44, 52),
                 muted: Color::Rgb(100, 104, 115),
                 accent: Color::Rgb(75, 60, 160),
@@ -365,6 +368,7 @@ impl Theme {
         } else {
             Self {
                 bg: Color::Rgb(30, 30, 46),
+                surface: Color::Rgb(49, 50, 68),
                 fg: Color::Rgb(205, 214, 244),
                 muted: Color::Rgb(127, 132, 156),
                 accent: Color::Rgb(203, 166, 247),

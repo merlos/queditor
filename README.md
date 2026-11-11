@@ -85,6 +85,11 @@ entering the UI. `queditor --help` shows CLI options.
 ## Current features
 
 - UTF-8 text editing, grapheme-aware selection, mouse selection and wheel scrolling.
+- Borderless lighter editor/prompt panels and submitted messages; standard-background
+  agent replies with model footers, and an agent/mode/model label inside the prompt.
+  Filename and dirty marker precede cursor position in the bottom status line.
+- Distinct You/agent label colors, matching prompt agent color, and source-preserving
+  Markdown highlighting in bot replies; activity spinners smoothly cycle rainbow colors.
 - Undo/redo, internal copy/cut/paste, terminal bracketed paste.
 - Basic source-preserving Markdown/frontmatter colors.
 - Wide/narrow layouts, status messages, file explorer, search/replace commands.

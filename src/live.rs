@@ -872,6 +872,7 @@ mod tests {
         let runtime = tokio::runtime::Runtime::new().unwrap();
         let mut app = App::new(None).unwrap();
         app.agent = 0;
+        app.config.model = "ollama::fixture:26b".into();
         let (sender, receiver) = mpsc::channel(8);
         let task = runtime.spawn(std::future::pending());
         let message = app.messages.len();
@@ -888,6 +889,54 @@ mod tests {
         (runtime, app, sender)
     }
     #[test]
+    fn response_model_footer_waits_for_completion_and_preserves_request_model() {
+        use ratatui::{Terminal, backend::TestBackend};
+        let (_runtime, mut app, sender) = job_app(None, false);
+        let index = app.active_message_index().unwrap();
+        assert_eq!(
+            app.messages[index].model.as_deref(),
+            Some("ollama::fixture:26b")
+        );
+        app.config.model = "ollama::next:8b".into();
+        sender.try_send(Event::Text("Answer".into())).unwrap();
+        app.poll_live();
+        let mut terminal = Terminal::new(TestBackend::new(140, 40)).unwrap();
+        terminal
+            .draw(|frame| crate::ui::draw(frame, &mut app))
+            .unwrap();
+        let screen = terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect::<String>();
+        assert!(!screen.contains("ollama:fixture:26b"));
+        assert!(screen.contains(&format!(
+            "Planner {} · ollama:next:8b",
+            if app.agent_mode() == AgentMode::Chat {
+                "Chat"
+            } else {
+                "Agent"
+            }
+        )));
+        sender.try_send(Event::Done(vec![])).unwrap();
+        app.poll_live();
+        terminal
+            .draw(|frame| crate::ui::draw(frame, &mut app))
+            .unwrap();
+        let screen = terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect::<String>();
+        assert!(screen.contains("ollama:fixture:26b"));
+        assert!(!screen.contains("Streaming..."));
+    }
+
+    #[test]
     fn activity_renders_below_responding_agent_through_full_spinner_cycle() {
         use ratatui::{Terminal, backend::TestBackend};
         let (_runtime, mut app, sender) = job_app(None, false);
@@ -895,7 +944,8 @@ mod tests {
         app.message("system", "Unrelated output");
         let mut terminal = Terminal::new(TestBackend::new(140, 40)).unwrap();
         let mut frames = std::collections::HashSet::new();
-        for frame in 0..=10 {
+        let mut colors = std::collections::HashSet::new();
+        for frame in 0..=120 {
             app.animation_frame = frame;
             terminal
                 .draw(|frame| crate::ui::draw(frame, &mut app))
@@ -914,10 +964,21 @@ mod tests {
                 .unwrap();
             assert!(rows[heading + 1].contains("Thinking..."));
             let spinner = rows[heading + 1].chars().next().unwrap();
-            if frame == 10 {
+            if frame % 10 == 0 {
                 assert_eq!(spinner, '⠋');
-            } else {
+            }
+            if frame < 10 {
                 assert!(frames.insert(spinner));
+            }
+            let activity_y = app.chat_area.y + 1 + (heading + 1) as u16;
+            let spinner_cell = &buffer[(app.chat_area.x + 1, activity_y)];
+            let text_cell = &buffer[(app.chat_area.x + 3, activity_y)];
+            assert_eq!(text_cell.fg, app.theme.muted);
+            assert_eq!(spinner_cell.bg, app.theme.bg);
+            if frame < 120 {
+                assert!(colors.insert(spinner_cell.fg));
+            } else {
+                assert_eq!(spinner_cell.fg, ratatui::style::Color::Rgb(255, 0, 0));
             }
         }
         sender.try_send(Event::Text("Answer".into())).unwrap();

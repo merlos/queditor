@@ -207,8 +207,8 @@ class SmokeTests(unittest.TestCase):
             visible = "\n".join("".join(row) for row in app.screen)
             self.assertNotIn("you:", visible)
             self.assertNotIn("/mode agent", visible)
-            self.assertEqual("".join(app.screen[0]).count("draft.md"), 1)
-            self.assertNotIn("draft.md", "".join(app.screen[-2]))
+            self.assertNotIn("draft.md", "".join(app.screen[0]))
+            self.assertEqual("".join(app.screen[-2]).strip(), "draft.md · 1:1")
             app.send(b"/models ollama::remembered\r", b"Model selected and remembered")
             saved = (config / "queditor/config.yaml").read_text()
             self.assertIn("agent: Blogger", saved)
@@ -219,12 +219,13 @@ class SmokeTests(unittest.TestCase):
 
             restarted = TerminalApp(doc, config, backend=b"ollama::remembered")
             self.addCleanup(restarted.close)
-            restarted.send(b"\t", "CHAT · Blogger".encode())
-            self.assertIn("Blogger", "".join(restarted.screen[-2]))
-            self.assertIn("Agent", "".join(restarted.screen[0]))
+            restarted.send(b"\t", "Blogger Agent · ollama:remembered".encode())
+            self.assertNotIn("Blogger", "".join(restarted.screen[-2]))
+            self.assertNotIn("Agent", "".join(restarted.screen[0]))
+            self.assertEqual("".join(restarted.screen[-2]).strip(), "draft.md · 1:1")
             self.assertNotIn("ollama::remembered", "".join(restarted.screen[-2]))
             visible = "\n".join("".join(row) for row in restarted.screen)
-            self.assertIn("Model: ollama::remembered", visible)
+            self.assertIn("Blogger Agent · ollama:remembered", visible)
             restarted.send(b"\x11")
             restarted.finish()
 
@@ -381,6 +382,13 @@ class LiveSmokeTests(unittest.TestCase):
                 ],
                 ["call-1", "call-2"],
             )
+            visible = "\n".join("".join(row) for row in app.screen)
+            self.assertIn("Planner Chat · company:test", visible)
+            self.assertGreaterEqual(visible.count("company:test"), 2)
+            app.send(b"/models mock\r", b"Model selected and remembered")
+            visible = "\n".join("".join(row) for row in app.screen)
+            self.assertIn("Planner Chat · mock (offline)", visible)
+            self.assertIn("company:test", visible)  # The completed reply retains its model.
             app.send(b"\x11")
             app.finish()
 

@@ -22,13 +22,31 @@ masked API-key field.
 
 At widths >=124 columns, panels have at least 80 and 40 usable columns. Below
 that, the editor sits above chat. Terminals smaller than 30×10 show a resize message.
-The filename and unsaved-change marker appear only in the editor header. The
-assistant header shows just Chat or Agent. Messages are labeled `You:` or with the
+The editor and prompt use lighter, borderless background panels. Submitted messages
+use the same lighter background; agent replies stay on the standard background.
+The filename and unsaved-change marker appear in the bottom status line before
+the line/column numbers; the editor and assistant headers are empty. Messages are labeled `You:` or with the
 responding agent's name (for example, `Planner:`); changing agents does not rename
-earlier responses. Running activity and a full-cycle spinner appear directly below
-the responding agent's name, together with the Escape cancellation hint. The current
-model appears below the prompt. The bottom bar shows cursor position, focus, and
-selected agent, without the model or theme name.
+earlier responses. `You:` uses the theme's green color, while agent names use the
+accent color. The agent name below the prompt matches its chat heading; the model
+label and Chat/Agent mode stay muted. Running activity and a full-cycle spinner appear directly below
+the responding agent's name, together with the Escape cancellation hint. The prompt
+panel includes the selected agent, mode, and model, for example `Planner Chat · provider:model:25b`.
+The spinner smoothly cycles through rainbow colors; activity text stays muted.
+A blank row separates the prompt text from this label when space permits. In the
+side-by-side layout, the prompt panel's bottom edge aligns with the editor panel.
+Completed replies end with the model used for that response; changing models does
+not relabel earlier replies. Older saved replies without model metadata remain
+unattributed. Mock responses and the mock prompt label explicitly say `mock (offline)`.
+The bottom bar shows the filename, unsaved-change marker, and cursor position,
+without focus, agent, model, or theme names.
+
+Bot replies use Markdown colors for headings, bold/italic emphasis, inline and
+fenced code, links/images, block quotes, and strikethrough, including while streaming.
+Markdown markers remain visible, and long lines wrap without losing their colors.
+Submitted messages and system output stay plain. Links and images are only colored
+text: the renderer does not open URLs or fetch content. Code blocks use a code color,
+not language-specific syntax highlighting.
 
 ## Files
 
