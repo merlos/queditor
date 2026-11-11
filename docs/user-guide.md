@@ -113,7 +113,7 @@ arguments. For example, `/co` then Enter opens `/connect` immediately.
 Slash commands are not echoed as `You:` messages in either mode; command output
 and errors remain visible, and successful commands can still be recalled with Up.
 `/help` lists commands; `/version` displays the running Queditor version (for example,
-`queditor 0.1.0`), the same package version reported by `queditor --version`.
+`queditor 0.2.0`), the same package version reported by `queditor --version`.
 Command errors appear in red directly above the prompt hints; failed input stays
 in the prompt for correction. Long errors wrap across up to three lines.
 Long prompt lines wrap within the composer. Up on the prompt's first visual line

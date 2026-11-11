@@ -28,8 +28,8 @@ It does not create a GitHub Release.
 4. Create and push a matching tag, for example:
 
    ```sh
-   git tag -a v0.1.0 -m "Queditor v0.1.0"
-   git push origin v0.1.0
+   git tag -a v0.2.0 -m "Queditor v0.2.0"
+   git push origin v0.2.0
    ```
 
 The workflow refuses a tag that does not exactly equal `v` plus the version in
