@@ -199,7 +199,8 @@ On Unix, SIGTERM/SIGHUP/SIGINT trigger a final checkpoint and terminal restorati
 retaining recovery rather than treating interruption as an intentional discard.
 SIGKILL cannot run cleanup and may lose input since the last checkpoint.
 
-`/recover` lists IDs. `/recover <id>` restores into the editor after dirty-content
+`/recover` opens a newest-first keyboard/mouse snapshot picker showing a short ID,
+age, and document path. Escape closes it. `/recover <id>` restores into the editor after dirty-content
 confirmation. Inspect and save explicitly; external-change checks still apply.
 `/recover delete <id>` deletes an old snapshot. `recovery: false` disables new
 document checkpoints (including pre-agent-edit snapshots), without deleting existing

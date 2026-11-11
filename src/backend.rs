@@ -4,10 +4,13 @@ use anyhow::{Context, Result, bail};
 use futures::StreamExt;
 use genai::{
     Client, WebConfig,
-    chat::{ChatMessage, ChatOptions, ChatRequest, ChatStreamEvent, Tool, ToolResponse},
+    chat::{ChatMessage, ChatOptions, ChatRequest, ChatStreamEvent, Tool, ToolResponse, Usage},
 };
 use serde_json::{Value, json};
-use std::{path::PathBuf, time::Duration};
+use std::{
+    path::PathBuf,
+    time::{Duration, Instant},
+};
 use tokio::sync::{mpsc, oneshot};
 
 pub struct Request {
@@ -22,6 +25,8 @@ pub struct Request {
 #[derive(Debug)]
 pub enum Event {
     Text(String),
+    RequestStarted,
+    Usage(RequestUsage),
     Permission {
         target: Box<Target>,
         reply: oneshot::Sender<Option<Target>>,
@@ -29,6 +34,57 @@ pub enum Event {
     Proposal(String),
     Done(Vec<ChatMessage>),
     Failed(String),
+}
+
+/// Provider-reported totals across tool rounds. Missing counts are never estimated.
+#[derive(Clone, Debug, Default, serde::Serialize, serde::Deserialize, PartialEq)]
+pub struct RequestUsage {
+    pub input_tokens: u64,
+    pub output_tokens: u64,
+    pub input_unknown: bool,
+    pub output_unknown: bool,
+    pub seconds: f64,
+    pub rounds: u64,
+}
+
+impl RequestUsage {
+    pub fn from_provider(usage: Option<&Usage>, duration: Duration) -> Self {
+        let input = usage
+            .and_then(|u| u.prompt_tokens)
+            .and_then(|n| u64::try_from(n).ok());
+        let output = usage
+            .and_then(|u| u.completion_tokens)
+            .and_then(|n| u64::try_from(n).ok());
+        Self {
+            input_tokens: input.unwrap_or(0),
+            output_tokens: output.unwrap_or(0),
+            input_unknown: input.is_none(),
+            output_unknown: output.is_none(),
+            seconds: duration.as_secs_f64(),
+            rounds: 1,
+        }
+    }
+
+    pub fn add(&mut self, other: &Self) {
+        self.input_tokens = self.input_tokens.saturating_add(other.input_tokens);
+        self.output_tokens = self.output_tokens.saturating_add(other.output_tokens);
+        self.input_unknown |= other.input_unknown;
+        self.output_unknown |= other.output_unknown;
+        self.seconds += other.seconds;
+        self.rounds = self.rounds.saturating_add(other.rounds);
+    }
+
+    pub fn tokens_per_second(&self) -> Option<f64> {
+        if self.rounds == 0
+            || self.output_unknown
+            || !self.seconds.is_finite()
+            || self.seconds <= 0.0
+        {
+            return None;
+        }
+        let rate = self.output_tokens as f64 / self.seconds;
+        rate.is_finite().then_some(rate)
+    }
 }
 
 pub fn client() -> genai::Result<Client> {
@@ -102,6 +158,7 @@ async fn conversation(request: Request, sender: &mpsc::Sender<Event>) -> Result<
     let options = ChatOptions::default()
         .with_max_tokens(8192)
         .with_capture_content(true)
+        .with_capture_usage(true)
         .with_capture_tool_calls(true)
         .with_capture_reasoning_content(true)
         .with_stream_header_timeout(Duration::from_secs(120))
@@ -110,6 +167,8 @@ async fn conversation(request: Request, sender: &mpsc::Sender<Event>) -> Result<
     let mut tool_count = 0;
     let mut proposed = false;
     for _ in 0..8 {
+        sender.send(Event::RequestStarted).await?;
+        let started = Instant::now();
         let mut stream = client
             .exec_chat_stream(target.clone(), chat.clone(), Some(&options))
             .await
@@ -146,6 +205,12 @@ async fn conversation(request: Request, sender: &mpsc::Sender<Event>) -> Result<
         let end = end.ok_or_else(|| {
             anyhow::anyhow!("Provider stream ended without a completion marker; no edits applied")
         })?;
+        sender
+            .send(Event::Usage(RequestUsage::from_provider(
+                end.captured_usage.as_ref(),
+                started.elapsed(),
+            )))
+            .await?;
         if end
             .captured_stop_reason
             .as_ref()
@@ -256,4 +321,48 @@ fn string_arg<'a>(value: &'a Value, name: &str) -> Result<&'a str> {
         .get(name)
         .and_then(Value::as_str)
         .ok_or_else(|| anyhow::anyhow!("Missing string tool argument"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn usage_sums_tool_rounds_and_uses_output_tokens_over_provider_time() {
+        let usage = Usage {
+            prompt_tokens: Some(100),
+            completion_tokens: Some(20),
+            ..Default::default()
+        };
+        let mut total = RequestUsage::from_provider(Some(&usage), Duration::from_secs(2));
+        total.add(&RequestUsage::from_provider(
+            Some(&usage),
+            Duration::from_secs(3),
+        ));
+        assert_eq!(
+            (total.input_tokens, total.output_tokens, total.rounds),
+            (200, 40, 2)
+        );
+        assert_eq!(total.tokens_per_second(), Some(8.0));
+        let restored: RequestUsage =
+            serde_json::from_str(&serde_json::to_string(&total).unwrap()).unwrap();
+        assert_eq!(restored, total);
+    }
+
+    #[test]
+    fn missing_negative_and_zero_duration_usage_never_fabricate_speed() {
+        let usage = Usage {
+            prompt_tokens: Some(-1),
+            completion_tokens: Some(0),
+            ..Default::default()
+        };
+        let mut total = RequestUsage::from_provider(Some(&usage), Duration::ZERO);
+        assert!(total.input_unknown);
+        assert!(!total.output_unknown);
+        assert_eq!(total.tokens_per_second(), None);
+        total.add(&RequestUsage::from_provider(None, Duration::from_secs(2)));
+        assert!(total.output_unknown);
+        assert_eq!(total.tokens_per_second(), None);
+        assert_eq!(RequestUsage::default().tokens_per_second(), None);
+    }
 }

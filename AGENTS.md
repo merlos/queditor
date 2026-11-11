@@ -13,13 +13,13 @@ library. Never imply mock responses are live AI or every provider is account-tes
 - `src/app.rs`: application state, actions, commands, context, agents, mock proposals.
 - `src/document.rs`: Unicode-aware document operations, history, safe file handling.
 - `src/config.rs`: embedded defaults, YAML profiles, semantic theme colors.
-- `src/backend.rs`: genai streaming/tool loop, budgets, timeouts, sanitized errors.
+- `src/backend.rs`: genai streaming/tool loop, provider usage/timing, budgets, timeouts, sanitized errors.
 - `src/provider.rs`: validated provider endpoints, model discovery, exact genai targets.
 - `src/credentials.rs`: environment/keyring/private-file secret resolution and storage.
 - `src/live.rs`: async job lifecycle, snapshot validation, permission/state orchestration.
 - `src/review.rs`: already-applied edit ranges, manual-edit rebasing, protected Keep/Undo state.
 - `src/tools.rs`: exact-path grants, sensitive exclusions, anchored file capabilities.
-- `src/storage.rs`: private versioned recovery/session/permission records.
+- `src/storage.rs`: private versioned recovery/session/permission records and recovery-picker metadata.
 - `src/ui.rs`: rendering and layout; do not perform filesystem/network I/O here.
 - `src/lib.rs`: reusable modules for tests and future clients.
 - `website/`: Astro/Starlight marketing and documentation site; `docs/` remains

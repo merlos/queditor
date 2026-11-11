@@ -27,7 +27,7 @@ pub const COMMANDS: &[(&str, &str)] = &[
     ),
     ("/sessions", "List saved sessions; /sessions delete <id>"),
     ("/resume", "Resume saved session: /resume <id>"),
-    ("/recover", "List/restore recovery; /recover delete <id>"),
+    ("/recover", "Select/restore recovery; /recover delete <id>"),
     ("/cd", "Change workspace: /cd <path>"),
     ("/ls", "List files: /ls [path]"),
     ("/files", "Open file explorer"),
@@ -46,6 +46,7 @@ pub const COMMANDS: &[(&str, &str)] = &[
     ("/rewrite", "Mock proposal: /rewrite <replacement text>"),
     ("/find", "Find text: /find <text>"),
     ("/replace", "Replace all: /replace <old> <new>"),
+    ("/version", "Display Queditor version"),
     ("/help", "Available commands"),
 ];
 
@@ -70,6 +71,8 @@ pub struct Message {
     /// Model selected when this response started; never infer it on restoration.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub usage: Option<crate::backend::RequestUsage>,
 }
 #[derive(Clone)]
 pub struct Attachment {
@@ -173,6 +176,7 @@ pub struct App {
     pub connect_choice_area: Rect,
     pub model_picker: Option<ModelPicker>,
     pub agent_picker: Option<usize>,
+    pub recovery_picker: Option<RecoveryPicker>,
     pub popup_choice_area: Rect,
     pub popup_choice_start: usize,
     pub popup_selected: usize,
@@ -229,6 +233,11 @@ pub struct ModelPicker {
     pub models: Vec<String>,
     pub selected: usize,
     pub scroll: usize,
+}
+
+pub struct RecoveryPicker {
+    pub entries: Vec<crate::storage::RecoveryEntry>,
+    pub selected: usize,
 }
 
 impl App {
@@ -331,6 +340,7 @@ impl App {
             connect_choice_area: Rect::default(),
             model_picker: None,
             agent_picker: None,
+            recovery_picker: None,
             popup_choice_area: Rect::default(),
             popup_choice_start: 0,
             popup_selected: 0,
@@ -378,6 +388,7 @@ impl App {
                 "mock" => Some("mock".into()),
                 _ => None,
             },
+            usage: None,
         });
         self.follow_chat = true;
     }
@@ -429,6 +440,10 @@ impl App {
         }
         if self.agent_picker.is_some() {
             self.agent_picker_key(key);
+            return;
+        }
+        if self.recovery_picker.is_some() {
+            self.recovery_picker_key(key);
             return;
         }
         if self.pending.is_some() {
@@ -803,7 +818,11 @@ impl App {
             self.connect_paste(text);
             return;
         }
-        if self.pending.is_some() || self.model_picker.is_some() || self.agent_picker.is_some() {
+        if self.pending.is_some()
+            || self.model_picker.is_some()
+            || self.agent_picker.is_some()
+            || self.recovery_picker.is_some()
+        {
             return;
         }
         if self.focus == Focus::Editor {
@@ -1125,6 +1144,7 @@ impl App {
                 }
                 self.message("keys", text);
             }
+            "/version" => self.message("version", concat!("queditor ", env!("CARGO_PKG_VERSION"))),
             "/help" => self.message(
                 "help",
                 COMMANDS
@@ -1246,6 +1266,38 @@ impl App {
             }
             _ => {}
         }
+    }
+
+    fn recovery_picker_key(&mut self, key: KeyEvent) {
+        let Some(picker) = self.recovery_picker.as_mut() else {
+            return;
+        };
+        match key.code {
+            KeyCode::Esc => self.recovery_picker = None,
+            KeyCode::Up => picker.selected = picker.selected.saturating_sub(1),
+            KeyCode::Down => {
+                picker.selected = (picker.selected + 1).min(picker.entries.len().saturating_sub(1))
+            }
+            KeyCode::Enter => {
+                let selected = picker.selected;
+                self.select_recovery_picker_at(selected);
+            }
+            _ => {}
+        }
+    }
+
+    fn select_recovery_picker_at(&mut self, selected: usize) {
+        let Some(entry) = self
+            .recovery_picker
+            .as_ref()
+            .and_then(|p| p.entries.get(selected))
+        else {
+            return;
+        };
+        let id = entry.id.clone();
+        self.recovery_picker = None;
+        self.popup_choice_area = Rect::default();
+        self.request(Pending::Recover(id));
     }
 
     fn select_agent_picker_at(&mut self, selected: usize) {
@@ -2138,6 +2190,12 @@ impl App {
             }
             return;
         }
+        if self.recovery_picker.is_some() {
+            if let Some(choice) = self.popup_mouse_choice(event) {
+                self.select_recovery_picker_at(choice);
+            }
+            return;
+        }
         if self.focus == Focus::Chat
             && !self.completions().is_empty()
             && let Some(choice) = self.popup_mouse_choice(event)
@@ -2653,6 +2711,29 @@ mod tests {
         assert!(a.composer.is_empty());
         assert!(a.prompt_history_index.is_none());
         assert_eq!(a.prompt_history.last().unwrap(), "original prompt");
+    }
+
+    #[test]
+    fn version_command_completes_and_displays_package_version_without_editing() {
+        let mut a = app();
+        a.document.insert("界 draft");
+        let revision = a.document.revision;
+        a.focus = Focus::Chat;
+        a.compose_insert("/ver");
+        a.key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        let message = a.messages.last().unwrap();
+        assert_eq!(message.role, "version");
+        assert_eq!(
+            message.text,
+            format!("queditor {}", env!("CARGO_PKG_VERSION"))
+        );
+        assert!(a.messages.iter().all(|message| message.role != "you"));
+        assert!(a.composer.is_empty());
+        assert_eq!(a.prompt_history.last().unwrap(), "/version");
+        assert_eq!(a.document.text, "界 draft");
+        assert_eq!(a.document.revision, revision);
+        a.command("/help").unwrap();
+        assert!(a.messages.last().unwrap().text.contains("/version"));
     }
 
     #[test]

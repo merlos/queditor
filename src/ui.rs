@@ -42,10 +42,17 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
             model_picker(frame, app);
         } else if app.agent_picker.is_some() {
             agent_picker(frame, app);
+        } else if app.recovery_picker.is_some() {
+            recovery_picker(frame, app);
         }
         return;
     }
-    let rows = Layout::vertical([Constraint::Min(1), Constraint::Length(2)]).split(area);
+    let status = status_lines(app, area.width as usize);
+    let rows = Layout::vertical([
+        Constraint::Min(1),
+        Constraint::Length(status.len() as u16 + 1),
+    ])
+    .split(area);
     let wide = rows[0].width >= 124;
     let panels = Layout::default()
         .direction(if wide {
@@ -63,13 +70,6 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
         })
         .split(rows[0]);
     app.chat_area = panels[1];
-    let name = app
-        .document
-        .path
-        .as_ref()
-        .and_then(|p| p.file_name())
-        .map(|p| p.to_string_lossy().into_owned())
-        .unwrap_or_else(|| "[Untitled]".into());
     let editor_block = pane("", app.focus == Focus::Editor, app);
     app.editor_area = editor_block.inner(panels[0]);
     frame.render_widget(
@@ -82,14 +82,6 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
     } else {
         chat(frame, app);
     }
-    let (row, col) = app.document.line_column();
-    let status = format!(
-        " {}{} · {}:{}",
-        safe(&name),
-        if app.document.dirty() { " *" } else { "" },
-        row + 1,
-        col + 1,
-    );
     let level = match app.level {
         Level::Info => ("INFO", theme.muted),
         Level::Success => ("OK", theme.green),
@@ -117,20 +109,16 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
     } else {
         format!(" {}: {}", level.0, safe(&app.status))
     };
-    frame.render_widget(
-        Paragraph::new(vec![
-            Line::from(status),
-            Line::styled(
-                detail,
-                Style::default().fg(if app.proposal.is_some() || app.review.is_some() {
-                    theme.yellow
-                } else {
-                    level.1
-                }),
-            ),
-        ]),
-        rows[1],
-    );
+    let mut status = status.into_iter().map(Line::from).collect::<Vec<_>>();
+    status.push(Line::styled(
+        detail,
+        Style::default().fg(if app.proposal.is_some() || app.review.is_some() {
+            theme.yellow
+        } else {
+            level.1
+        }),
+    ));
+    frame.render_widget(Paragraph::new(status), rows[1]);
     if app.save_prompt.is_some() {
         save_prompt(frame, app);
     } else if app.pending.is_some() {
@@ -143,7 +131,67 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
         model_picker(frame, app);
     } else if app.agent_picker.is_some() {
         agent_picker(frame, app);
+    } else if app.recovery_picker.is_some() {
+        recovery_picker(frame, app);
     }
+}
+
+fn token_count(tokens: u64, unknown: bool) -> String {
+    match (tokens, unknown) {
+        (0, true) => "?".into(),
+        (_, true) => format!("{tokens}+?"),
+        (_, false) => tokens.to_string(),
+    }
+}
+
+fn file_size(bytes: usize) -> String {
+    let size = bytes as f64;
+    if bytes < 1_000 {
+        format!("{bytes} b")
+    } else if bytes < 1_000_000 {
+        format!("{:.2} KB", size / 1_000.0)
+    } else if bytes < 1_000_000_000 {
+        format!("{:.2} MB", size / 1_000_000.0)
+    } else {
+        format!("{:.2} GB", size / 1_000_000_000.0)
+    }
+}
+
+fn status_lines(app: &App, width: usize) -> Vec<String> {
+    let name = app
+        .document
+        .path
+        .as_ref()
+        .and_then(|p| p.file_name())
+        .map(|p| p.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "[Untitled]".into());
+    // Bound long filenames so statistics cannot crowd out the editor on small screens.
+    let name = safe(&name).replace(['\n', '\t'], " ");
+    let mut shortened = String::new();
+    for grapheme in name.graphemes(true) {
+        if display_width(&shortened) + display_width(grapheme) > width / 3 {
+            shortened.push('…');
+            break;
+        }
+        shortened.push_str(grapheme);
+    }
+    let (row, col) = app.document.line_column();
+    let stats = app.document.statistics();
+    let usage = &app.live.usage;
+    wrapped(
+        &format!(
+            " {shortened}{} · {}:{} · {} words · {} chars · {} · Tokens in {} out {}",
+            if app.document.dirty() { " *" } else { "" },
+            row + 1,
+            col + 1,
+            stats.words,
+            stats.characters,
+            file_size(stats.bytes),
+            token_count(usage.input_tokens, usage.input_unknown),
+            token_count(usage.output_tokens, usage.output_unknown),
+        ),
+        width,
+    )
 }
 
 fn pane(title: &str, focused: bool, app: &App) -> Block<'static> {
@@ -1127,7 +1175,23 @@ fn chat_lines(app: &App, width: usize) -> Vec<Line<'static>> {
             && app.active_message_index() != Some(index)
             && let Some(model) = &message.model
         {
-            lines.extend(wrapped(&model_label(model), width).into_iter().map(|line| {
+            let mut footer = model_label(model);
+            if model != "mock" {
+                let usage = message.usage.as_ref();
+                let input = usage.map_or_else(
+                    || "?".into(),
+                    |u| token_count(u.input_tokens, u.input_unknown || u.rounds == 0),
+                );
+                let output = usage.map_or_else(
+                    || "?".into(),
+                    |u| token_count(u.output_tokens, u.output_unknown || u.rounds == 0),
+                );
+                let speed = usage
+                    .and_then(|u| u.tokens_per_second())
+                    .map_or_else(|| "?".into(), |r| format!("{r:.1}"));
+                footer.push_str(&format!(" · in {input} out {output} · {speed} tk/s"));
+            }
+            lines.extend(wrapped(&footer, width).into_iter().map(|line| {
                 Line::styled(line, Style::default().fg(app.theme.muted).bg(app.theme.bg))
             }));
         }
@@ -1796,6 +1860,78 @@ fn model_picker(frame: &mut Frame, app: &mut App) {
     );
 }
 
+fn recovery_picker(frame: &mut Frame, app: &mut App) {
+    let Some(picker) = &app.recovery_picker else {
+        return;
+    };
+    let area = frame.area();
+    let w = area.width.min(90);
+    let h = area.height.min(18);
+    let popup = Rect::new(
+        area.x + (area.width - w) / 2,
+        area.y + (area.height - h) / 2,
+        w,
+        h,
+    );
+    let visible = usize::from(h.saturating_sub(4));
+    let start = picker.selected.saturating_sub(visible.saturating_sub(1));
+    app.popup_choice_area = Rect::new(
+        popup.x + 1,
+        popup.y + 2,
+        w.saturating_sub(2),
+        picker.entries.len().saturating_sub(start).min(visible) as u16,
+    );
+    app.popup_choice_start = start;
+    let mut lines = vec![Line::styled(
+        if picker.entries.is_empty() {
+            "No recovery snapshots available"
+        } else {
+            "Choose a snapshot to restore"
+        },
+        Style::default()
+            .fg(app.theme.accent)
+            .add_modifier(Modifier::BOLD),
+    )];
+    lines.extend(
+        picker
+            .entries
+            .iter()
+            .enumerate()
+            .skip(start)
+            .take(visible)
+            .map(|(index, entry)| {
+                Line::styled(
+                    format!(
+                        "{} {}",
+                        if index == picker.selected { ">" } else { " " },
+                        crop(
+                            &entry.label.replace(['\n', '\t'], " "),
+                            0,
+                            usize::from(w.saturating_sub(4))
+                        )
+                    ),
+                    Style::default().fg(if index == picker.selected {
+                        app.theme.accent
+                    } else {
+                        app.theme.fg
+                    }),
+                )
+            }),
+    );
+    lines.resize(visible + 1, Line::from(""));
+    lines.push(Line::styled(
+        "↑/↓ select · Enter/click restore · Esc close",
+        Style::default().fg(app.theme.muted),
+    ));
+    frame.render_widget(Clear, popup);
+    frame.render_widget(
+        Paragraph::new(lines)
+            .block(Block::default().borders(Borders::ALL).title(" Recovery "))
+            .style(Style::default().bg(app.theme.bg).fg(app.theme.fg)),
+        popup,
+    );
+}
+
 fn popup_option<'a>(selected: bool, key: &'a str, label: &'a str, app: &App) -> Line<'a> {
     Line::from(vec![
         Span::styled(
@@ -1962,7 +2098,7 @@ mod tests {
                 let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
                 app.follow_editor = false;
                 // Bring the second block's controls into view on short terminals.
-                app.editor_scroll = 4;
+                app.editor_scroll = if width == 30 { 5 } else { 4 };
                 terminal.draw(|f| draw(f, &mut app)).unwrap();
                 let button = app
                     .review_buttons
@@ -2295,12 +2431,49 @@ mod tests {
             .iter()
             .map(ToString::to_string)
             .collect::<Vec<_>>();
-        assert_eq!(lines[2], "provider:model:26b");
+        assert_eq!(lines[2], "provider:model:26b · in ? out ? · ? tk/s");
         assert_eq!(lines[6], "mock (offline)");
         assert!(!lines.iter().any(|line| line.contains("different:8b")));
         let restored: crate::app::Message =
             serde_json::from_str(&serde_json::to_string(&app.messages[0]).unwrap()).unwrap();
         assert_eq!(restored.model.as_deref(), Some("provider::model:26b"));
+    }
+
+    #[test]
+    fn usage_footer_and_status_show_counts_rates_partial_totals_and_scaled_sizes() {
+        let mut app = App::new(None).unwrap();
+        app.messages.clear();
+        app.config.model = "provider::fixture".into();
+        app.message("assistant", "answer");
+        let usage = crate::backend::RequestUsage {
+            input_tokens: 120,
+            output_tokens: 30,
+            seconds: 2.0,
+            rounds: 1,
+            ..Default::default()
+        };
+        app.messages[0].usage = Some(usage.clone());
+        app.live.usage = usage;
+        let lines = chat_lines(&app, 30)
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>()
+            .join("");
+        assert!(lines.contains("in 120 out 30 · 15.0 tk/s"));
+        app.live.usage.input_unknown = true;
+        app.document.insert("hello 界");
+        let status = status_lines(&app, 140).join("");
+        assert!(status.contains("2 words · 7 chars · 9 b"));
+        assert!(status.contains("Tokens in 120+? out 30"));
+        assert_eq!(file_size(0), "0 b");
+        assert_eq!(file_size(999), "999 b");
+        assert_eq!(file_size(1_000), "1.00 KB");
+        assert_eq!(file_size(1_000_000), "1.00 MB");
+        assert_eq!(file_size(1_000_000_000), "1.00 GB");
+        assert_eq!(token_count(0, true), "?");
+        let restored: crate::app::Message =
+            serde_json::from_str(&serde_json::to_string(&app.messages[0]).unwrap()).unwrap();
+        assert_eq!(restored.usage, app.messages[0].usage);
     }
 
     #[test]
@@ -2327,7 +2500,11 @@ mod tests {
                     if width >= 80 {
                         assert!(footer.contains("Planner Chat · mock (offline)"));
                     }
-                    assert_eq!(footer_y, height - 3, "no spacing below the prompt panel");
+                    assert_eq!(
+                        footer_y,
+                        height - status_lines(&app, width as usize).len() as u16 - 2,
+                        "no spacing below the prompt panel"
+                    );
                     if width >= 124 {
                         assert_eq!(footer_y, app.editor_area.bottom());
                         assert_eq!(buffer[(app.editor_area.x, footer_y)].bg, app.theme.surface);
@@ -2645,11 +2822,17 @@ mod tests {
                     assert!(row(0, 0, width).trim().is_empty());
                     let header = row(app.chat_area.y, app.chat_area.x, app.chat_area.right());
                     assert!(header.trim().is_empty());
-                    let status = row(height - 2, 0, width);
-                    assert_eq!(
-                        status.trim(),
-                        format!("{} * · 1:8", path.unwrap_or("[Untitled]"))
+                    let count = status_lines(&app, width as usize).len() as u16;
+                    let status = (height - count - 1..height - 1)
+                        .map(|y| row(y, 0, width).trim().to_owned())
+                        .collect::<Vec<_>>()
+                        .join("");
+                    assert!(
+                        status.starts_with(&format!("{} * · 1:8", path.unwrap_or("[Untitled]")))
                     );
+                    let compact = status.split_whitespace().collect::<String>();
+                    assert!(compact.contains("1words·7chars·7b"));
+                    assert!(compact.contains("Tokensin0out0"));
                     assert!(!status.contains("CHAT"));
                     assert!(!status.contains("EDITOR"));
                     assert!(!status.contains(&app.agents[app.agent].name));
@@ -2667,16 +2850,18 @@ mod tests {
                     app.document.undo();
                     terminal.draw(|frame| draw(frame, &mut app)).unwrap();
                     let buffer = terminal.backend().buffer();
+                    let y = height - status_lines(&app, width as usize).len() as u16 - 1;
                     let mut status = String::new();
                     let mut x = 0;
                     while x < width {
-                        let symbol = buffer[(x, height - 2)].symbol();
+                        let symbol = buffer[(x, y)].symbol();
                         status.push_str(symbol);
                         x += display_width(symbol).max(1) as u16;
                     }
-                    assert_eq!(
-                        status.trim(),
-                        format!("{} · 1:1", path.unwrap_or("[Untitled]"))
+                    assert!(
+                        status
+                            .trim()
+                            .starts_with(&format!("{} · 1:1", path.unwrap_or("[Untitled]")))
                     );
                 }
             }

@@ -80,7 +80,8 @@ entering the UI. `queditor --help` shows CLI options.
   Click a block's Keep/Undo shortcut label to act directly on that block.
 - `/rewrite "replacement text"` previews a replacement for selection/context,
   or the whole document when neither is present.
-- `/help` lists commands; `/keys` shows the current editing bindings.
+- `/help` lists commands; `/keys` shows the current editing bindings;
+  `/version` displays the running Queditor version.
 
 ## Current features
 
@@ -93,13 +94,15 @@ entering the UI. `queditor --help` shows CLI options.
 - Undo/redo, internal copy/cut/paste, terminal bracketed paste.
 - Basic source-preserving Markdown/frontmatter colors.
 - Wide/narrow layouts, status messages, file explorer, search/replace commands.
+- Per-request provider token counts and output tk/s; running token totals, document
+  word/character counts, and UTF-8 size in the bottom bar.
 - Mocha/daylight themes, VS Code-style and Emacs-style editing presets.
 - YAML configuration and custom Markdown agent definitions.
 - Attached context snapshots, stale-edit checks, and manual-edit protection during review.
 - Temporary-file saves, newline preservation, and disk-change checks at save time.
 - Live streaming, cancellation, model switching, and conversation compaction.
 - Read/list tools with once/session/exact-path persistent permission choices.
-- Private recovery checkpoints and opt-in saved sessions.
+- Private recovery checkpoints with a keyboard/mouse restore picker and opt-in saved sessions.
 
 ## Enable live AI
 

@@ -40,7 +40,23 @@ pub struct Recovery {
     pub disk_baseline: Option<String>,
 }
 
+#[derive(Debug, PartialEq, Eq)]
+pub struct Statistics {
+    pub words: usize,
+    pub characters: usize,
+    pub bytes: usize,
+}
+
 impl Document {
+    /// Counts the live buffer, including unsaved edits, not mock preview or diff rows.
+    pub fn statistics(&self) -> Statistics {
+        Statistics {
+            words: self.text.unicode_words().count(),
+            characters: self.text.graphemes(true).count(),
+            bytes: self.text.len(),
+        }
+    }
+
     pub fn recovery(&self) -> Recovery {
         Recovery {
             text: self.text.clone(),
@@ -651,6 +667,45 @@ mod tests {
         assert_eq!(d.cursor, 0);
         d.delete();
         assert!(d.text.is_empty());
+    }
+
+    #[test]
+    fn statistics_count_unicode_words_graphemes_and_exact_utf8_bytes() {
+        let mut d = Document::default();
+        assert_eq!(
+            d.statistics(),
+            Statistics {
+                words: 0,
+                characters: 0,
+                bytes: 0
+            }
+        );
+        let text = "Hello e\u{301} 👩‍💻\n界";
+        d.insert(text);
+        assert_eq!(
+            d.statistics(),
+            Statistics {
+                words: 3,
+                characters: 11,
+                bytes: text.len()
+            }
+        );
+        d.undo();
+        assert_eq!(d.statistics().bytes, 0);
+        d.redo();
+        assert_eq!(d.statistics().bytes, text.len());
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("crlf.md");
+        fs::write(&path, "one\r\ntwo\r\n").unwrap();
+        let d = Document::open(&path).unwrap();
+        assert_eq!(
+            d.statistics(),
+            Statistics {
+                words: 2,
+                characters: 8,
+                bytes: 10
+            }
+        );
     }
 
     #[test]

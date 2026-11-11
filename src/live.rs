@@ -24,6 +24,8 @@ pub struct Live {
     pub store: Option<Store>,
     pub session_id: String,
     pub discovery: Option<Discovery>,
+    /// Observed usage in this application run; /new and resume do not reset or replay it.
+    pub usage: backend::RequestUsage,
 }
 pub struct Discovery {
     receiver: oneshot::Receiver<Result<Vec<String>, String>>,
@@ -37,6 +39,7 @@ pub struct Job {
     proposal: Option<String>,
     compact: bool,
     prompt: String,
+    usage_pending: bool,
 }
 pub struct PermissionPrompt {
     pub target: Target,
@@ -203,6 +206,7 @@ impl App {
         let task = runtime.spawn(backend::run(request, sender));
         let message = self.messages.len();
         self.message("assistant", "");
+        self.messages[message].usage = Some(backend::RequestUsage::default());
         self.live.job = Some(Job {
             receiver,
             task,
@@ -211,6 +215,7 @@ impl App {
             proposal: None,
             compact,
             prompt: prompt.into(),
+            usage_pending: false,
         });
         self.notify(
             Level::Info,
@@ -239,6 +244,23 @@ impl App {
             };
             changed = true;
             match event {
+                Event::RequestStarted => {
+                    if let Some(job) = &mut self.live.job {
+                        job.usage_pending = true;
+                    }
+                }
+                Event::Usage(usage) => {
+                    if let Some(job) = &mut self.live.job
+                        && let Some(message) = self.messages.get_mut(job.message)
+                    {
+                        job.usage_pending = false;
+                        message
+                            .usage
+                            .get_or_insert_with(Default::default)
+                            .add(&usage);
+                        self.live.usage.add(&usage);
+                    }
+                }
                 Event::Text(text) => {
                     if let Some(job) = &self.live.job
                         && let Some(message) = self.messages.get_mut(job.message)
@@ -455,8 +477,9 @@ impl App {
     }
 
     fn fail_live(&mut self, error: &str) {
-        if let Some(job) = self.live.job.take() {
+        if let Some(mut job) = self.live.job.take() {
             job.task.abort();
+            self.finish_job_usage(&mut job);
             if let Some(message) = self.messages.get_mut(job.message) {
                 message
                     .text
@@ -472,8 +495,9 @@ impl App {
     }
 
     pub fn cancel_live(&mut self) {
-        if let Some(job) = self.live.job.take() {
+        if let Some(mut job) = self.live.job.take() {
             job.task.abort();
+            self.finish_job_usage(&mut job);
             if let Some(message) = self.messages.get_mut(job.message) {
                 message.text.push_str("\n[Cancelled; no edits applied]");
             }
@@ -483,6 +507,35 @@ impl App {
             );
         }
         self.live.permission = None;
+    }
+
+    fn finish_job_usage(&mut self, job: &mut Job) {
+        // Account for already-queued reports without ever accepting late edits/history.
+        while let Ok(event) = job.receiver.try_recv() {
+            match event {
+                Event::RequestStarted => job.usage_pending = true,
+                Event::Usage(usage) => {
+                    job.usage_pending = false;
+                    if let Some(message) = self.messages.get_mut(job.message) {
+                        message
+                            .usage
+                            .get_or_insert_with(Default::default)
+                            .add(&usage);
+                        self.live.usage.add(&usage);
+                    }
+                }
+                _ => {}
+            }
+        }
+        if let Some(message) = self.messages.get_mut(job.message) {
+            let usage = message.usage.get_or_insert_with(Default::default);
+            if job.usage_pending || usage.rounds == 0 {
+                usage.input_unknown = true;
+                usage.output_unknown = true;
+                self.live.usage.input_unknown = true;
+                self.live.usage.output_unknown = true;
+            }
+        }
     }
 
     pub fn permission_key(&mut self, key: crossterm::event::KeyEvent) {
@@ -608,12 +661,17 @@ impl App {
             .as_ref()
             .context("Local state storage is unavailable")?;
         match args[0].as_str() {
-            "/sessions" | "/recover" if args.get(1).is_none() => {
-                let kind = if args[0] == "/sessions" {
-                    "session"
-                } else {
-                    "recovery"
-                };
+            "/recover" if args.get(1).is_none() => {
+                let entries = store.recovery_entries()?;
+                self.recovery_picker = Some(crate::app::RecoveryPicker {
+                    entries,
+                    selected: 0,
+                });
+                self.popup_choice_area = ratatui::layout::Rect::default();
+                self.popup_choice_start = 0;
+            }
+            "/sessions" if args.get(1).is_none() => {
+                let kind = "session";
                 let ids = store.list(kind)?;
                 self.message(
                     "state",
@@ -885,6 +943,7 @@ mod tests {
             proposal: None,
             compact,
             prompt: "revise".into(),
+            usage_pending: false,
         });
         (runtime, app, sender)
     }
@@ -934,6 +993,139 @@ mod tests {
             .collect::<String>();
         assert!(screen.contains("ollama:fixture:26b"));
         assert!(!screen.contains("Streaming..."));
+    }
+
+    #[test]
+    fn usage_is_attributed_to_request_survives_new_session_and_marks_unreported_cancel() {
+        let (_runtime, mut app, sender) = job_app(None, false);
+        let index = app.active_message_index().unwrap();
+        let usage = backend::RequestUsage {
+            input_tokens: 100,
+            output_tokens: 20,
+            seconds: 2.0,
+            rounds: 1,
+            ..Default::default()
+        };
+        sender.try_send(Event::Usage(usage.clone())).unwrap();
+        sender.try_send(Event::Usage(usage)).unwrap();
+        sender.try_send(Event::Done(vec![])).unwrap();
+        app.poll_live();
+        assert_eq!(
+            app.messages[index].usage.as_ref().unwrap().output_tokens,
+            40
+        );
+        assert_eq!(
+            app.messages[index]
+                .usage
+                .as_ref()
+                .unwrap()
+                .tokens_per_second(),
+            Some(10.0)
+        );
+        assert_eq!(app.live.usage.input_tokens, 200);
+        app.new_session();
+        assert_eq!(app.live.usage.input_tokens, 200);
+        assert!(app.messages.iter().all(|m| m.usage.is_none()));
+
+        let (_runtime, mut app, sender) = job_app(None, false);
+        sender
+            .try_send(Event::Usage(backend::RequestUsage {
+                input_tokens: 7,
+                output_tokens: 4,
+                seconds: 1.0,
+                rounds: 1,
+                ..Default::default()
+            }))
+            .unwrap();
+        sender.try_send(Event::RequestStarted).unwrap();
+        app.poll_live();
+        app.cancel_live();
+        assert_eq!(app.live.usage.input_tokens, 7);
+        assert!(app.live.usage.input_unknown);
+        assert!(
+            app.messages
+                .last()
+                .unwrap()
+                .usage
+                .as_ref()
+                .unwrap()
+                .tokens_per_second()
+                .is_none()
+        );
+        app.new_session();
+        app.poll_live();
+        assert_eq!(app.live.usage.input_tokens, 7);
+    }
+
+    #[test]
+    fn recovery_picker_supports_selection_cancel_and_dirty_confirmation_without_disk_writes() {
+        use crossterm::event::{
+            KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
+        };
+        use ratatui::{Terminal, backend::TestBackend};
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("draft.md");
+        std::fs::write(&path, "disk original").unwrap();
+        let mut app = App::new(Some(&path)).unwrap();
+        let store = Store::new(dir.path().join("state")).unwrap();
+        for _ in 0..20 {
+            let mut document = crate::document::Document::default();
+            document.insert("recovered 界");
+            store
+                .agent_checkpoint(&uuid::Uuid::new_v4().to_string(), document.recovery())
+                .unwrap();
+        }
+        app.live.store = Some(store);
+        app.command("/recover").unwrap();
+        app.paste("ignored");
+        assert_eq!(app.document.text, "disk original");
+        app.key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+        assert_eq!(app.recovery_picker.as_ref().unwrap().selected, 1);
+        app.key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        assert!(app.recovery_picker.is_none());
+        app.command("/recover").unwrap();
+        app.key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert_eq!(app.document.text, "recovered 界");
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "disk original");
+        app.command("/recover").unwrap();
+        app.recovery_picker.as_mut().unwrap().selected = 19;
+        let mut terminal = Terminal::new(TestBackend::new(30, 10)).unwrap();
+        terminal
+            .draw(|frame| crate::ui::draw(frame, &mut app))
+            .unwrap();
+        assert!(app.popup_choice_start > 0);
+        assert!(app.popup_choice_area.bottom() <= 10);
+        let area = app.popup_choice_area;
+        app.mouse(MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: area.x,
+            row: area.y,
+            modifiers: KeyModifiers::NONE,
+        });
+        assert!(app.recovery_picker.is_none());
+        assert!(matches!(app.pending, Some(crate::app::Pending::Recover(_))));
+        app.key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        assert_eq!(app.document.text, "recovered 界");
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "disk original");
+    }
+
+    #[test]
+    fn empty_recovery_picker_can_be_closed_without_changing_document() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = App::new(None).unwrap();
+        app.live.store = Some(Store::new(dir.path().join("state")).unwrap());
+        app.command("/recover").unwrap();
+        app.key(crossterm::event::KeyEvent::new(
+            crossterm::event::KeyCode::Enter,
+            crossterm::event::KeyModifiers::NONE,
+        ));
+        assert!(app.recovery_picker.as_ref().unwrap().entries.is_empty());
+        assert!(app.document.text.is_empty());
+        app.key(crossterm::event::KeyEvent::new(
+            crossterm::event::KeyCode::Esc,
+            crossterm::event::KeyModifiers::NONE,
+        ));
+        assert!(app.recovery_picker.is_none());
     }
 
     #[test]

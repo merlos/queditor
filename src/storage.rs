@@ -37,6 +37,11 @@ pub struct Store {
     pub root: PathBuf,
     instance: String,
 }
+
+pub struct RecoveryEntry {
+    pub id: String,
+    pub label: String,
+}
 impl Store {
     pub fn new(root: PathBuf) -> Result<Self> {
         fs::create_dir_all(&root)?;
@@ -115,6 +120,36 @@ impl Store {
             bail!("Unsupported recovery version");
         }
         Ok(record.document)
+    }
+    /// Prepare picker metadata here, never during rendering. Newest snapshots come first.
+    pub fn recovery_entries(&self) -> Result<Vec<RecoveryEntry>> {
+        let mut entries = Vec::new();
+        for id in self.list("recovery")? {
+            let modified = fs::metadata(self.path("recovery", &id)?)?
+                .modified()
+                .unwrap_or(std::time::UNIX_EPOCH);
+            let age = modified.elapsed().unwrap_or_default().as_secs();
+            let age = if age < 60 {
+                format!("{age}s")
+            } else if age < 3600 {
+                format!("{}m", age / 60)
+            } else if age < 86400 {
+                format!("{}h", age / 3600)
+            } else {
+                format!("{}d", age / 86400)
+            };
+            let name = match self.recover(&id) {
+                Ok(record) => record
+                    .path
+                    .map(|p| p.display().to_string())
+                    .unwrap_or_else(|| "[Untitled]".into()),
+                Err(_) => "[Unavailable snapshot]".into(),
+            };
+            let label = format!("{} · {age} ago · {name}", &id[..8]);
+            entries.push((modified, RecoveryEntry { id, label }));
+        }
+        entries.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.id.cmp(&b.1.id)));
+        Ok(entries.into_iter().map(|(_, entry)| entry).collect())
     }
     pub fn resume(&self, id: &str) -> Result<Session> {
         let session: Session = read_json(&self.path("session", id)?)?;
@@ -271,6 +306,7 @@ mod tests {
                 text: "prompt".into(),
                 agent: None,
                 model: None,
+                usage: None,
             }],
             history: vec![ChatMessage::user("prompt")],
             model: "mock".into(),
@@ -286,5 +322,40 @@ mod tests {
         assert!(store.list("recovery").unwrap().is_empty());
         store.delete("session", &id).unwrap();
         assert!(store.list("session").unwrap().is_empty());
+    }
+
+    #[test]
+    fn recovery_picker_metadata_is_newest_first_and_tolerates_invalid_snapshots() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::new(dir.path().join("state")).unwrap();
+        let older = uuid::Uuid::new_v4().to_string();
+        let newer = uuid::Uuid::new_v4().to_string();
+        let mut document = crate::document::Document::default();
+        document.insert("private contents must not appear in labels");
+        store.agent_checkpoint(&older, document.recovery()).unwrap();
+        store.agent_checkpoint(&newer, document.recovery()).unwrap();
+        fs::File::open(store.path("recovery", &older).unwrap())
+            .unwrap()
+            .set_modified(std::time::UNIX_EPOCH + std::time::Duration::from_secs(100))
+            .unwrap();
+        let entries = store.recovery_entries().unwrap();
+        assert_eq!(entries[0].id, newer);
+        assert_eq!(entries[1].id, older);
+        assert!(entries[0].label.contains("[Untitled]"));
+        assert!(
+            entries
+                .iter()
+                .all(|e| !e.label.contains("private contents"))
+        );
+        fs::write(store.path("recovery", &newer).unwrap(), "invalid json").unwrap();
+        let entries = store.recovery_entries().unwrap();
+        assert!(
+            entries
+                .iter()
+                .find(|e| e.id == newer)
+                .unwrap()
+                .label
+                .contains("Unavailable snapshot")
+        );
     }
 }

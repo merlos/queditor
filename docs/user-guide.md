@@ -40,6 +40,21 @@ not relabel earlier replies. Older saved replies without model metadata remain
 unattributed. Mock responses and the mock prompt label explicitly say `mock (offline)`.
 The bottom bar shows the filename, unsaved-change marker, and cursor position,
 without focus, agent, model, or theme names.
+It also shows Unicode word and character counts (characters are grapheme clusters),
+the live document's UTF-8 size, and total input/output tokens observed during this
+application run. Size uses decimal units: b below 1,000 bytes, then KB, MB, and GB.
+Counts include unsaved text, not mock previews or deleted diff rows; the bar wraps
+on narrow screens so these statistics remain visible.
+
+Completed live replies show `in <tokens> out <tokens> · <rate> tk/s` beside their
+original model. Counts come from the provider and include all tool-generation rounds;
+speed is output tokens divided by combined provider request time, including network
+latency and reasoning but excluding local tools and permission waits. `?` means
+unreported usage or unavailable speed; `123+?` means at least 123 known tokens with
+additional usage unknown. Cancelled/failed requests retain reported rounds but may
+have unreported consumption. Mock replies stay explicitly offline without invented
+usage. `/new` does not reset run totals; resuming history does not count old usage
+again. Per-response metrics are saved only when session persistence is enabled.
 
 Bot replies use Markdown colors for headings, bold/italic emphasis, inline and
 fenced code, links/images, block quotes, and strikethrough, including while streaming.
@@ -77,8 +92,11 @@ rejected, as are files larger than 8 MiB.
 
 External changes are checked when saving. If a file changed or disappeared, save
 to a new filename or cancel/reopen. Private recovery checkpoints are enabled by
-default; `/recover` lists snapshots and `/recover <id>` restores into the editor
-without writing the document. Checkpoints are not a substitute for explicit saves.
+default; `/recover` opens a newest-first snapshot picker showing a short identifier,
+age, and document path (or `[Untitled]`). Use Up/Down and Enter or click a snapshot;
+Escape closes the picker. Selecting a snapshot or using `/recover <id>` restores
+into the editor without writing the document, after any unsaved-change confirmation.
+`/recover delete <id>` deletes a snapshot. Checkpoints are not a substitute for explicit saves.
 
 ## Search
 
@@ -94,6 +112,8 @@ runs the highlighted command, and Tab completes without submitting so you can ad
 arguments. For example, `/co` then Enter opens `/connect` immediately.
 Slash commands are not echoed as `You:` messages in either mode; command output
 and errors remain visible, and successful commands can still be recalled with Up.
+`/help` lists commands; `/version` displays the running Queditor version (for example,
+`queditor 0.1.0`), the same package version reported by `queditor --version`.
 Command errors appear in red directly above the prompt hints; failed input stays
 in the prompt for correction. Long errors wrap across up to three lines.
 Long prompt lines wrap within the composer. Up on the prompt's first visual line

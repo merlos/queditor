@@ -86,6 +86,11 @@ selection/document snapshots, and local mock edit demonstrations.
 The editor/prompt/submitted messages use lighter borderless theme surfaces; the
 prompt identifies agent/model, and response footers use per-message model metadata
 captured at response creation and preserved by optional session persistence.
+Live response footers also preserve provider-reported input/output usage across
+tool rounds and output throughput over provider request time. Application-run usage
+totals and live Unicode document statistics appear in a wrapping bottom status bar.
+Recovery selection uses a newest-first keyboard/mouse popup, with storage preparing
+snapshot metadata before rendering and restoration retaining dirty-document guards.
 Chat reply rendering now uses `pulldown-cmark` source offsets for Markdown colors,
 including streamed fragments and nested styles across Unicode-aware soft wraps.
 The editor's existing lightweight source highlighting remains separate; neither
