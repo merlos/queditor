@@ -144,14 +144,14 @@ async fn conversation(request: Request, sender: &mpsc::Sender<Event>) -> Result<
             }
         }
         let end = end.ok_or_else(|| {
-            anyhow::anyhow!("Provider stream ended without a completion marker; no edits staged")
+            anyhow::anyhow!("Provider stream ended without a completion marker; no edits applied")
         })?;
         if end
             .captured_stop_reason
             .as_ref()
             .is_some_and(|r| r.is_max_tokens())
         {
-            bail!("Provider response was truncated; no edits staged");
+            bail!("Provider response was truncated; no edits applied");
         }
         let calls = end
             .captured_tool_calls()
@@ -199,7 +199,7 @@ async fn conversation(request: Request, sender: &mpsc::Sender<Event>) -> Result<
                     }
                     sender.send(Event::Proposal(replacement.into())).await?;
                     proposed = true;
-                    Ok("Proposal queued for explicit review after successful completion; not applied or saved.".into())
+                    Ok("Edit queued. Queditor will validate, apply and save it after successful completion, then show Keep/Undo review. It is not saved yet.".into())
                 }
             } else if matches!(call.fn_name.as_str(), "read_file" | "list_directory") {
                 let path = string_arg(&call.fn_arguments, "path")?.to_owned();

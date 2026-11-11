@@ -11,6 +11,7 @@ use std::{
     ops::Range,
     path::{Path, PathBuf},
 };
+use unicode_segmentation::UnicodeSegmentation;
 
 pub const COMMANDS: &[(&str, &str)] = &[
     ("/new", "New chat session"),
@@ -38,7 +39,7 @@ pub const COMMANDS: &[(&str, &str)] = &[
     ("/mode", "Set agent mode: /mode chat|agent"),
     (
         "/changes",
-        "Review changes: next|prev|keep|reject|keep-all|reject-all",
+        "Review changes: next|prev|keep|undo|keep-all|undo-all|expand|collapse (reject aliases undo)",
     ),
     ("/attach", "Attach selection, document, or clear"),
     ("/demo", "Mock uppercase edit proposal"),
@@ -64,6 +65,8 @@ pub enum Level {
 pub struct Message {
     pub role: String,
     pub text: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent: Option<String>,
 }
 #[derive(Clone)]
 pub struct Attachment {
@@ -112,6 +115,12 @@ pub struct Agent {
     pub instructions: String,
 }
 
+pub struct SavePrompt {
+    pub input: String,
+    pub cursor: usize,
+    pub error: Option<String>,
+}
+
 pub struct App {
     pub live: crate::live::Live,
     pub document: Document,
@@ -133,8 +142,17 @@ pub struct App {
     pub agent: usize,
     pub attachment: Option<Attachment>,
     pub proposal: Option<Proposal>,
+    pub review: Option<crate::review::Review>,
+    /// Review rows map only live document lines; removed lines and headers have no cursor.
+    pub review_view_rows: Vec<Option<(usize, usize)>>,
+    /// Pending change owning each visible review row, including removed lines.
+    pub review_row_hunks: Vec<Option<usize>>,
+    /// Visible, clipped Keep/Undo labels: rectangle, change index, Keep flag.
+    pub review_buttons: Vec<(Rect, usize, bool)>,
+    pub review_gutter: usize,
     pub explorer: Option<Explorer>,
     pub pending: Option<Pending>,
+    pub save_prompt: Option<SavePrompt>,
     pub status: String,
     pub level: Level,
     pub quit: bool,
@@ -151,6 +169,7 @@ pub struct App {
     pub connect: Option<ConnectWizard>,
     pub connect_choice_area: Rect,
     pub model_picker: Option<ModelPicker>,
+    pub agent_picker: Option<usize>,
     pub popup_choice_area: Rect,
     pub popup_choice_start: usize,
     pub popup_selected: usize,
@@ -285,8 +304,14 @@ impl App {
             agent: 0,
             attachment: None,
             proposal: None,
+            review: None,
+            review_view_rows: vec![],
+            review_row_hunks: vec![],
+            review_buttons: vec![],
+            review_gutter: 0,
             explorer: None,
             pending: None,
+            save_prompt: None,
             status: "Tab switches panes · Ctrl+S saves · Ctrl+Q exits · /help in chat".into(),
             level: Level::Info,
             quit: false,
@@ -302,6 +327,7 @@ impl App {
             connect: None,
             connect_choice_area: Rect::default(),
             model_picker: None,
+            agent_picker: None,
             popup_choice_area: Rect::default(),
             popup_choice_start: 0,
             popup_selected: 0,
@@ -342,6 +368,8 @@ impl App {
         self.messages.push(Message {
             role: role.into(),
             text: text.into(),
+            agent: matches!(role, "assistant" | "mock")
+                .then(|| self.agents[self.agent].name.clone()),
         });
         self.follow_chat = true;
     }
@@ -358,9 +386,29 @@ impl App {
     }
 
     pub fn key(&mut self, key: KeyEvent) {
+        self.sync_review();
+        let cursor = self.document.cursor;
+        self.key_inner(key);
+        self.sync_review();
+        if self.document.cursor != cursor {
+            self.select_change_at_cursor();
+        }
+    }
+
+    fn select_change_at_cursor(&mut self) {
+        if let Some(review) = &mut self.review {
+            review.select_at(self.document.cursor);
+        }
+    }
+
+    fn key_inner(&mut self, key: KeyEvent) {
         // Escape is the universal, highest-priority interrupt while an agent is active.
         if key.code == KeyCode::Esc && self.busy() {
             self.cancel_live();
+            return;
+        }
+        if self.save_prompt.is_some() {
+            self.save_prompt_key(key);
             return;
         }
         if self.connect.is_some() {
@@ -369,6 +417,10 @@ impl App {
         }
         if self.model_picker.is_some() {
             self.model_picker_key(key);
+            return;
+        }
+        if self.agent_picker.is_some() {
+            self.agent_picker_key(key);
             return;
         }
         if self.pending.is_some() {
@@ -396,7 +448,7 @@ impl App {
             self.permission_key(key);
             return;
         }
-        if self.proposal.is_some() && self.change_review_key(key) {
+        if (self.proposal.is_some() || self.review.is_some()) && self.change_review_key(key) {
             return;
         }
         if key.code == KeyCode::Tab {
@@ -553,13 +605,25 @@ impl App {
                 self.compose_insert("\n")
             }
             KeyCode::Char('j') if ctrl => self.compose_insert("\n"),
-            KeyCode::Enter => {
-                let choices = self.completions();
-                if !choices.is_empty() && !choices.contains(&self.composer.as_str()) {
-                    self.complete();
-                } else {
-                    self.submit();
+            KeyCode::Char('a') if ctrl => {
+                self.composer_cursor = self.composer[..self.composer_cursor]
+                    .rfind('\n')
+                    .map_or(0, |index| index + 1);
+            }
+            KeyCode::Char('e') if ctrl => self.composer_cursor = self.composer_line_end(),
+            KeyCode::Char('k') if ctrl => {
+                let end = self.composer_line_end();
+                if end > self.composer_cursor {
+                    self.stop_browsing_prompt_history();
+                    self.composer.replace_range(self.composer_cursor..end, "");
+                    self.completion = 0;
                 }
+            }
+            KeyCode::Enter => {
+                if !self.completions().is_empty() {
+                    self.complete();
+                }
+                self.submit();
             }
             KeyCode::Left => self.composer_cursor = previous(&self.composer, self.composer_cursor),
             KeyCode::Right => self.composer_cursor = next(&self.composer, self.composer_cursor),
@@ -607,6 +671,12 @@ impl App {
             }
             _ => {}
         }
+    }
+
+    fn composer_line_end(&self) -> usize {
+        self.composer[self.composer_cursor..]
+            .find('\n')
+            .map_or(self.composer.len(), |index| self.composer_cursor + index)
     }
 
     fn complete(&mut self) {
@@ -711,11 +781,21 @@ impl App {
     }
 
     pub fn paste(&mut self, text: &str) {
+        self.sync_review();
+        self.paste_inner(text);
+        self.sync_review();
+    }
+
+    fn paste_inner(&mut self, text: &str) {
+        if self.save_prompt.is_some() {
+            self.save_prompt_insert(text);
+            return;
+        }
         if self.connect.is_some() {
             self.connect_paste(text);
             return;
         }
-        if self.pending.is_some() || self.model_picker.is_some() {
+        if self.pending.is_some() || self.model_picker.is_some() || self.agent_picker.is_some() {
             return;
         }
         if self.focus == Focus::Editor {
@@ -763,24 +843,26 @@ impl App {
             );
             return;
         }
-        self.message("you", input.clone());
         if input.starts_with('/') {
             if let Err(e) = self.command(&input) {
                 self.notify(Level::Error, format!("{e:#}"));
                 return; // Keep failed input for correction.
             }
-        } else if self.config.model != "mock" {
-            if let Err(e) = self.start_live(&input, false) {
-                self.notify(Level::Error, format!("{e:#}"));
-                return;
-            }
         } else {
-            let context = self
-                .attachment
-                .as_ref()
-                .map(|a| format!(" Attached {} ({} bytes).", a.label, a.text.len()))
-                .unwrap_or_default();
-            self.message("mock", format!("{} is selected.{context} Mock mode is selected. /models <provider::model> enables live AI. /demo previews an uppercase edit; /rewrite <text> previews a replacement.", self.agents[self.agent].name));
+            self.message("you", input.clone());
+            if self.config.model != "mock" {
+                if let Err(e) = self.start_live(&input, false) {
+                    self.notify(Level::Error, format!("{e:#}"));
+                    return;
+                }
+            } else {
+                let context = self
+                    .attachment
+                    .as_ref()
+                    .map(|a| format!(" Attached {} ({} bytes).", a.label, a.text.len()))
+                    .unwrap_or_default();
+                self.message("mock", format!("{} is selected.{context} Mock mode is selected. /models <provider::model> enables live AI. /demo previews an uppercase edit; /rewrite <text> previews a replacement.", self.agents[self.agent].name));
+            }
         }
         self.prompt_history.push(input);
         self.stop_browsing_prompt_history();
@@ -790,14 +872,20 @@ impl App {
     }
 
     pub fn command(&mut self, input: &str) -> Result<()> {
+        self.sync_review();
+        let result = self.command_inner(input);
+        self.sync_review();
+        result
+    }
+
+    fn command_inner(&mut self, input: &str) -> Result<()> {
         let args = shlex::split(input).context("Unclosed quote in command")?;
         let arg = args.get(1).map(String::as_str);
         match args.first().map(String::as_str).unwrap_or("") {
             "/quit" | "/exit" => self.request(Pending::Quit),
             "/save" => {
                 let path = arg.map(|p| self.resolve(p));
-                self.document.save(path.as_deref())?;
-                self.notify(Level::Success, "Saved");
+                self.request_save(path.as_deref())?;
             }
             "/open" => {
                 if let Some(p) = arg {
@@ -884,15 +972,9 @@ impl App {
                         .position(|a| a.name.eq_ignore_ascii_case(name))
                         .context("Unknown agent")?;
                     self.select_agent(index)?;
+                } else {
+                    self.agent_picker = Some(self.agent);
                 }
-                self.message(
-                    "system",
-                    self.agents
-                        .iter()
-                        .map(|a| format!("{}: {}", a.name, a.description))
-                        .collect::<Vec<_>>()
-                        .join("\n"),
-                );
             }
             "/mode" => {
                 let mode = match arg {
@@ -903,13 +985,23 @@ impl App {
                 self.select_agent_mode(mode)?;
             }
             "/changes" => match arg {
+                Some("expand" | "collapse") => {
+                    let review = self
+                        .review
+                        .as_mut()
+                        .context("No applied agent changes to review")?;
+                    review.expanded = arg == Some("expand");
+                    self.follow_editor = true;
+                }
                 Some("next") => self.select_next_change(),
                 Some("prev") => self.select_previous_change(),
                 Some("keep") => self.accept_current_change(),
-                Some("reject") => self.reject_current_change(),
+                Some("reject" | "undo") => self.reject_current_change(),
                 Some("keep-all") => self.keep_all_changes(),
-                Some("reject-all") => self.reject_proposal(),
-                _ => bail!("Usage: /changes next|prev|keep|reject|keep-all|reject-all"),
+                Some("reject-all" | "undo-all") => self.reject_proposal(),
+                _ => bail!(
+                    "Usage: /changes next|prev|keep|undo|keep-all|undo-all|expand|collapse (reject aliases undo)"
+                ),
             },
             "/attach" => {
                 if arg == Some("clear") {
@@ -947,7 +1039,7 @@ impl App {
                 if self.busy() {
                     bail!("Cancel the current agent before creating a mock proposal");
                 }
-                if self.proposal.is_some() {
+                if self.proposal.is_some() || self.review.is_some() {
                     bail!("Resolve the current proposal first");
                 }
                 let range = if let Some(a) = &self.attachment {
@@ -1017,7 +1109,7 @@ impl App {
             }
             "/keys" => {
                 let mut text = format!(
-                    "Profile: {}\nGlobal: Tab focus; Ctrl+S save; Ctrl+Q quit\nChat: Enter submit; Ctrl+J newline; Shift+Tab agent; Tab complete\nEditor: arrows, Shift+arrows select, Home/End, PgUp/PgDown\nCopy/paste shortcuts use an internal clipboard; terminal paste is supported.\n",
+                    "Profile: {}\nGlobal: Tab focus; Ctrl+S save; Ctrl+Q quit\nChat: Enter submit; Ctrl+J newline; Shift+Tab agent; Tab complete; Ctrl+A/E line start/end; Ctrl+K delete to line end\nEditor: arrows, Shift+arrows select, Home/End, PgUp/PgDown\nCopy/paste shortcuts use an internal clipboard; terminal paste is supported.\n",
                     self.config.keybindings
                 );
                 for (key, action) in &self.bindings.editor {
@@ -1132,6 +1224,33 @@ impl App {
         Ok(())
     }
 
+    fn agent_picker_key(&mut self, key: KeyEvent) {
+        let Some(selected) = self.agent_picker.as_mut() else {
+            return;
+        };
+        match key.code {
+            KeyCode::Esc => self.agent_picker = None,
+            KeyCode::Up => *selected = selected.saturating_sub(1),
+            KeyCode::Down => *selected = (*selected + 1).min(self.agents.len().saturating_sub(1)),
+            KeyCode::Enter => {
+                let index = *selected;
+                self.select_agent_picker_at(index);
+            }
+            _ => {}
+        }
+    }
+
+    fn select_agent_picker_at(&mut self, selected: usize) {
+        if self.agent_picker.is_none() || selected >= self.agents.len() {
+            return;
+        }
+        if let Err(error) = self.select_agent(selected) {
+            self.notify(Level::Error, format!("Could not remember agent: {error:#}"));
+        } else {
+            self.agent_picker = None;
+        }
+    }
+
     fn select_agent(&mut self, index: usize) -> Result<()> {
         let previous_index = self.agent;
         let previous_name = self.config.agent.clone();
@@ -1176,7 +1295,15 @@ impl App {
         }
         self.notify(
             Level::Success,
-            format!("{} mode selected and remembered for {name}", mode.label()),
+            format!(
+                "{} mode selected and remembered for {name}{}",
+                mode.label(),
+                if mode == AgentMode::Agent {
+                    " · live edits apply and save before Keep/Undo review"
+                } else {
+                    " · read-only"
+                }
+            ),
         );
         Ok(())
     }
@@ -1451,6 +1578,13 @@ impl App {
     }
 
     pub fn accept_proposal(&mut self) {
+        if self.review.take().is_some() {
+            self.notify(
+                Level::Success,
+                "Agent changes kept; already applied and saved",
+            );
+            return;
+        }
         let Some(p) = self.proposal.take() else {
             return;
         };
@@ -1494,6 +1628,21 @@ impl App {
     }
 
     fn select_next_change(&mut self) {
+        if let Some(review) = &mut self.review {
+            if let Some(index) = (1..=review.hunks.len())
+                .map(|step| (review.active + step) % review.hunks.len())
+                .find(|&index| !review.hunks[index].resolved)
+            {
+                review.active = index;
+            } else {
+                return;
+            }
+            let range = review.hunks[review.active].range.clone();
+            self.document.move_to(range.start, false);
+            self.focus = Focus::Editor;
+            self.follow_editor = true;
+            return;
+        }
         let selected = if let Some(proposal) = &mut self.proposal {
             proposal.active_hunk = (proposal.active_hunk + 1) % proposal.hunks.len().max(1);
             Some((proposal.active_hunk + 1, proposal.hunks.len()))
@@ -1514,6 +1663,22 @@ impl App {
     }
 
     fn select_previous_change(&mut self) {
+        if let Some(review) = &mut self.review {
+            let len = review.hunks.len();
+            if let Some(index) = (1..=len)
+                .map(|step| (review.active + len - step) % len)
+                .find(|&index| !review.hunks[index].resolved)
+            {
+                review.active = index;
+            } else {
+                return;
+            }
+            self.document
+                .move_to(review.hunks[review.active].range.start, false);
+            self.focus = Focus::Editor;
+            self.follow_editor = true;
+            return;
+        }
         let selected = if let Some(proposal) = &mut self.proposal {
             proposal.active_hunk = proposal
                 .active_hunk
@@ -1545,6 +1710,10 @@ impl App {
     }
 
     fn resolve_current_change(&mut self, included: bool) {
+        if self.review.is_some() {
+            self.resolve_applied_changes(included, false);
+            return;
+        }
         let complete = if let Some(proposal) = &mut self.proposal {
             if let Some(hunk) = proposal.hunks.get_mut(proposal.active_hunk) {
                 hunk.included = included;
@@ -1569,6 +1738,10 @@ impl App {
     }
 
     fn keep_all_changes(&mut self) {
+        if self.review.is_some() {
+            self.resolve_applied_changes(true, true);
+            return;
+        }
         if let Some(proposal) = &mut self.proposal {
             for hunk in &mut proposal.hunks {
                 hunk.included = true;
@@ -1579,6 +1752,10 @@ impl App {
     }
 
     fn reject_proposal(&mut self) {
+        if self.review.is_some() {
+            self.resolve_applied_changes(false, true);
+            return;
+        }
         self.proposal = None;
         self.follow_editor = true;
         self.notify(
@@ -1596,14 +1773,184 @@ impl App {
         }
     }
 
+    pub fn sync_review(&mut self) {
+        if let Some(review) = &mut self.review {
+            let pending = review.pending();
+            review.sync(&self.document.text);
+            if review.pending() < pending {
+                self.notify(Level::Warning,
+                    "Manually edited agent changes protected from review Undo; other changes remain reviewable");
+            }
+        }
+    }
+
+    fn resolve_applied_changes(&mut self, keep: bool, all: bool) {
+        self.sync_review();
+        let Some(review) = &self.review else {
+            return;
+        };
+        let indices = review
+            .hunks
+            .iter()
+            .enumerate()
+            .filter(|(i, h)| !h.resolved && (all || *i == review.active))
+            .map(|(i, _)| i)
+            .collect::<Vec<_>>();
+        if indices.is_empty() {
+            if review.pending() == 0 {
+                self.review = None;
+            }
+            self.notify(
+                Level::Info,
+                "No pending changes here; manual edits are preserved",
+            );
+            return;
+        }
+        if !keep {
+            let mut text = self.document.text.clone();
+            for &index in indices.iter().rev() {
+                let h = &review.hunks[index];
+                if text.get(h.range.clone()) != Some(h.replacement.as_str()) {
+                    self.notify(Level::Error, "Change no longer matches; Undo refused");
+                    return;
+                }
+                text.replace_range(h.range.clone(), &h.original);
+            }
+            let len = self.document.text.len();
+            if let Err(error) = self.document.replace_and_save(0..len, &text) {
+                self.notify(
+                    Level::Error,
+                    format!("Undo not applied; could not save: {error:#}"),
+                );
+                return;
+            }
+        }
+        let review = self.review.as_mut().unwrap();
+        for index in indices {
+            review.hunks[index].resolved = true;
+        }
+        // Rebase other edits after the reverted ranges; resolved changes cannot be undone again.
+        review.sync(&self.document.text);
+        review.advance();
+        let remaining = review.pending();
+        if remaining == 0 {
+            self.review = None;
+        } else if let Some(h) = review.hunks.get(review.active) {
+            self.document.move_to(h.range.start, false);
+        }
+        self.follow_editor = true;
+        self.notify(
+            Level::Success,
+            format!(
+                "Changes {} · {remaining} pending · already saved{}",
+                if keep { "kept" } else { "undone" },
+                if self.document.is_temporary() {
+                    "; private temporary file; Ctrl+S chooses a filename"
+                } else if keep && self.document.dirty() {
+                    "; manual edits still unsaved"
+                } else {
+                    ""
+                }
+            ),
+        );
+    }
+
     fn save(&mut self, path: Option<&Path>) {
-        match self.document.save(path) {
-            Ok(()) => self.notify(Level::Success, "Saved"),
-            Err(e) => self.notify(Level::Error, format!("{e:#}")),
+        if let Err(e) = self.request_save(path) {
+            self.notify(Level::Error, format!("{e:#}"));
+        }
+    }
+
+    fn request_save(&mut self, path: Option<&Path>) -> Result<()> {
+        if path.is_none() && self.document.path.is_none() {
+            self.save_prompt = Some(SavePrompt {
+                input: String::new(),
+                cursor: 0,
+                error: None,
+            });
+            self.notify(Level::Info, "Enter a filename to save; Esc cancels");
+        } else {
+            self.document.save(path)?;
+            self.notify(Level::Success, "Saved");
+        }
+        Ok(())
+    }
+
+    fn save_prompt_insert(&mut self, text: &str) {
+        let prompt = self.save_prompt.as_mut().unwrap();
+        let text = text.chars().filter(|c| !c.is_control()).collect::<String>();
+        prompt.input.insert_str(prompt.cursor, &text);
+        let end = prompt.cursor + text.len();
+        prompt.cursor = prompt
+            .input
+            .grapheme_indices(true)
+            .map(|(i, _)| i)
+            .find(|i| *i >= end)
+            .unwrap_or(prompt.input.len());
+        prompt.error = None;
+    }
+
+    fn save_prompt_key(&mut self, key: KeyEvent) {
+        match key.code {
+            KeyCode::Esc => {
+                self.save_prompt = None;
+                self.notify(Level::Info, "Save cancelled");
+            }
+            KeyCode::Enter => {
+                let input = self.save_prompt.as_ref().unwrap().input.clone();
+                let result = if input.trim().is_empty() {
+                    Err(anyhow::anyhow!("Enter a filename"))
+                } else {
+                    self.document.save(Some(&self.resolve(&input)))
+                };
+                match result {
+                    Ok(()) => {
+                        self.save_prompt = None;
+                        self.notify(Level::Success, "Saved");
+                        if let Some(operation) = self.pending.take() {
+                            self.perform(operation);
+                        }
+                    }
+                    Err(error) => {
+                        let error = format!("{error:#}");
+                        self.save_prompt.as_mut().unwrap().error = Some(error.clone());
+                        self.notify(Level::Error, error);
+                    }
+                }
+            }
+            KeyCode::Char(c)
+                if !key
+                    .modifiers
+                    .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) =>
+            {
+                self.save_prompt_insert(&c.to_string());
+            }
+            _ => {
+                let prompt = self.save_prompt.as_mut().unwrap();
+                match key.code {
+                    KeyCode::Left => prompt.cursor = previous(&prompt.input, prompt.cursor),
+                    KeyCode::Right => prompt.cursor = next(&prompt.input, prompt.cursor),
+                    KeyCode::Home => prompt.cursor = 0,
+                    KeyCode::End => prompt.cursor = prompt.input.len(),
+                    KeyCode::Backspace if prompt.cursor > 0 => {
+                        let start = previous(&prompt.input, prompt.cursor);
+                        prompt.input.replace_range(start..prompt.cursor, "");
+                        prompt.cursor = start;
+                        prompt.error = None;
+                    }
+                    KeyCode::Delete if prompt.cursor < prompt.input.len() => {
+                        let end = next(&prompt.input, prompt.cursor);
+                        prompt.input.replace_range(prompt.cursor..end, "");
+                        prompt.error = None;
+                    }
+                    _ => {}
+                }
+            }
         }
     }
     pub(crate) fn request(&mut self, operation: Pending) {
-        if self.document.dirty() || self.proposal.is_some() || self.busy() {
+        if self.document.dirty() || self.proposal.is_some() || self.review.is_some() || self.busy()
+        {
             self.pending = Some(operation);
             self.popup_selected = 0;
         } else {
@@ -1626,12 +1973,7 @@ impl App {
         match choice {
             0 => {
                 if self.document.path.is_none() {
-                    self.pending = None;
-                    self.focus = Focus::Chat;
-                    self.notify(
-                        Level::Warning,
-                        "Use /save <path>, then retry opening or quitting",
-                    );
+                    self.save(None);
                 } else {
                     match self.document.save(None) {
                         Ok(()) => {
@@ -1656,10 +1998,14 @@ impl App {
     fn perform(&mut self, operation: Pending) {
         self.cancel_live();
         match operation {
-            Pending::Quit => self.quit = true,
+            Pending::Quit => {
+                self.review = None;
+                self.quit = true;
+            }
             Pending::Open(path) => match open_or_new(&path) {
                 Ok(d) => {
                     self.document = d;
+                    self.review = None;
                     self.proposal = None;
                     self.attachment = None;
                     self.explorer = None;
@@ -1682,6 +2028,7 @@ impl App {
                 match result {
                     Ok(d) => {
                         self.document = d;
+                        self.review = None;
                         self.proposal = None;
                         self.attachment = None;
                         self.editor_scroll = 0;
@@ -1750,6 +2097,9 @@ impl App {
     }
 
     pub fn mouse(&mut self, event: MouseEvent) {
+        if self.save_prompt.is_some() {
+            return;
+        }
         if self.connect.is_some() {
             self.connect_mouse(event);
             return;
@@ -1774,6 +2124,12 @@ impl App {
             }
             return;
         }
+        if self.agent_picker.is_some() {
+            if let Some(choice) = self.popup_mouse_choice(event) {
+                self.select_agent_picker_at(choice);
+            }
+            return;
+        }
         if self.focus == Focus::Chat
             && !self.completions().is_empty()
             && let Some(choice) = self.popup_mouse_choice(event)
@@ -1785,20 +2141,57 @@ impl App {
         let x = event.column;
         let y = event.row;
         if self.editor_area.contains((x, y).into()) {
+            if event.kind == MouseEventKind::Down(MouseButton::Left) {
+                self.sync_review();
+                if let Some((_, index, keep)) = self
+                    .review_buttons
+                    .iter()
+                    .find(|(rect, _, _)| rect.contains((x, y).into()))
+                    .copied()
+                    && let Some(review) = &mut self.review
+                    && review.hunks.get(index).is_some_and(|h| !h.resolved)
+                {
+                    review.active = index;
+                    self.focus = Focus::Editor;
+                    self.dragging = false;
+                    self.resolve_applied_changes(keep, false);
+                    // Until the next render, these screen coordinates are stale.
+                    self.review_buttons.clear();
+                    self.review_row_hunks.clear();
+                    self.review_view_rows.clear();
+                    return;
+                }
+            }
             match event.kind {
                 MouseEventKind::Down(MouseButton::Left)
                 | MouseEventKind::Drag(MouseButton::Left) => {
                     self.focus = Focus::Editor;
                     let visible = usize::from(y - self.editor_area.y);
+                    if let Some(Some(index)) = self.review_row_hunks.get(visible)
+                        && let Some(review) = &mut self.review
+                        && review.hunks.get(*index).is_some_and(|h| !h.resolved)
+                    {
+                        review.active = *index;
+                    }
                     let Some((row, start)) = self.editor_view_rows.get(visible).copied() else {
                         return;
                     };
-                    let col = start + usize::from(x - self.editor_area.x);
+                    let (row, start) = if self.review.is_some() {
+                        let Some(Some(position)) = self.review_view_rows.get(visible) else {
+                            return;
+                        };
+                        *position
+                    } else {
+                        (row, start)
+                    };
+                    let col = start
+                        + usize::from(x - self.editor_area.x).saturating_sub(self.review_gutter);
                     let p = self.document.position_at_display(row, col);
                     self.document.move_to(
                         p,
                         matches!(event.kind, MouseEventKind::Drag(_)) && self.dragging,
                     );
+                    self.select_change_at_cursor();
                     self.dragging = true;
                     self.follow_editor = false;
                 }
@@ -2169,6 +2562,282 @@ mod tests {
     fn app() -> App {
         App::new(None).unwrap()
     }
+    #[test]
+    fn agent_picker_supports_keyboard_mouse_cancel_and_direct_selection() {
+        let mut a = app();
+        a.focus = Focus::Chat;
+        a.agent = 0;
+        a.compose_insert("/agents");
+        a.key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert_eq!(a.agent_picker, Some(0));
+        assert!(a.composer.is_empty());
+        a.paste("ignored");
+        assert!(a.composer.is_empty());
+        a.key(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE));
+        assert_eq!(a.agent_picker, Some(0));
+        a.key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+        a.key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert_eq!(a.agent, 1);
+        assert_eq!(a.config.agent, a.agents[1].name);
+        assert!(a.agent_picker.is_none());
+
+        a.command("/agents").unwrap();
+        assert_eq!(a.agent_picker, Some(1));
+        a.key(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE));
+        a.key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        assert_eq!(a.agent, 1);
+        assert!(a.agent_picker.is_none());
+
+        a.command("/agents").unwrap();
+        a.popup_choice_area = Rect::new(10, 5, 40, 1);
+        a.popup_choice_start = 0;
+        a.mouse(MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: 12,
+            row: 5,
+            modifiers: KeyModifiers::NONE,
+        });
+        assert_eq!(a.agent, 0);
+        assert!(a.agent_picker.is_none());
+        a.command("/agents Blogger").unwrap();
+        assert_eq!(a.agents[a.agent].name, "Blogger");
+        assert!(a.agent_picker.is_none());
+    }
+
+    #[test]
+    fn prompt_control_line_keys_preserve_unicode_newlines_and_document() {
+        for profile in ["vscode", "emacs"] {
+            let mut a = app();
+            a.config.keybindings = profile.into();
+            a.focus = Focus::Chat;
+            a.composer_area = Rect::new(0, 0, 4, 3);
+            a.compose_insert("first\n界e\u{301}👩‍💻 tail\nlast");
+            a.composer_cursor = "first\n界e\u{301}".len();
+            a.key(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::CONTROL));
+            assert_eq!(a.composer_cursor, "first\n".len());
+            a.key(KeyEvent::new(KeyCode::Char('e'), KeyModifiers::CONTROL));
+            assert_eq!(a.composer_cursor, "first\n界e\u{301}👩‍💻 tail".len());
+            let original = a.composer.clone();
+            a.key(KeyEvent::new(KeyCode::Char('k'), KeyModifiers::CONTROL));
+            assert_eq!(a.composer, original);
+            a.composer_cursor = "first\n界e\u{301}".len();
+            a.key(KeyEvent::new(KeyCode::Char('k'), KeyModifiers::CONTROL));
+            assert_eq!(a.composer, "first\n界e\u{301}\nlast");
+            assert_eq!(a.composer_cursor, "first\n界e\u{301}".len());
+            a.composer_cursor = a.composer.len();
+            a.key(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::CONTROL));
+            a.key(KeyEvent::new(KeyCode::Char('k'), KeyModifiers::CONTROL));
+            assert_eq!(a.composer, "first\n界e\u{301}\n");
+            assert!(a.document.text.is_empty());
+            assert!(a.messages.iter().all(|message| message.role != "you"));
+        }
+    }
+
+    #[test]
+    fn killing_recalled_prompt_exits_history_without_modifying_saved_prompt() {
+        let mut a = app();
+        a.focus = Focus::Chat;
+        a.compose_insert("original prompt");
+        a.submit();
+        a.previous_prompt();
+        a.key(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::CONTROL));
+        a.key(KeyEvent::new(KeyCode::Char('k'), KeyModifiers::CONTROL));
+        assert!(a.composer.is_empty());
+        assert!(a.prompt_history_index.is_none());
+        assert_eq!(a.prompt_history.last().unwrap(), "original prompt");
+    }
+
+    #[test]
+    fn slash_commands_do_not_echo_but_output_and_prompts_remain_visible() {
+        for mode in [AgentMode::Chat, AgentMode::Agent] {
+            let mut a = app();
+            a.config
+                .agent_modes
+                .insert(a.agents[a.agent].name.clone(), mode);
+            a.compose_insert("/help");
+            a.submit();
+            assert!(!a.messages.iter().any(|message| message.role == "you"));
+            assert!(
+                a.messages
+                    .iter()
+                    .any(|message| message.text.contains("/help"))
+            );
+            assert_eq!(a.prompt_history.last().unwrap(), "/help");
+            a.compose_insert("Hello");
+            a.submit();
+            assert!(
+                a.messages
+                    .iter()
+                    .any(|message| message.role == "you" && message.text == "Hello")
+            );
+        }
+    }
+
+    #[test]
+    fn enter_runs_highlighted_slash_completion() {
+        let mut a = app();
+        a.focus = Focus::Chat;
+        a.compose_insert("/co");
+        a.key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert!(a.connect.is_some());
+        assert!(a.composer.is_empty());
+        assert!(!a.messages.iter().any(|message| message.role == "you"));
+        assert_eq!(a.prompt_history.last().unwrap(), "/connect");
+    }
+
+    #[test]
+    fn enter_runs_arrow_selected_command_and_preserves_failed_input() {
+        let mut a = app();
+        a.focus = Focus::Chat;
+        a.compose_insert("/c");
+        while a.completions()[a.completion] != "/cd" {
+            a.key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+        }
+        a.key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert!(matches!(a.level, Level::Error));
+        assert_eq!(a.status, "Usage: /cd <path>");
+        assert_eq!(a.composer.trim(), "/cd");
+        assert!(!a.messages.iter().any(|message| message.role == "you"));
+    }
+
+    #[test]
+    fn tab_completes_without_running_and_modified_enter_inserts_newline() {
+        let mut a = app();
+        a.focus = Focus::Chat;
+        a.compose_insert("/co");
+        a.key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+        assert_eq!(a.composer, "/connect ");
+        assert!(a.connect.is_none());
+        a.key(KeyEvent::new(KeyCode::Enter, KeyModifiers::SHIFT));
+        assert_eq!(a.composer, "/connect \n");
+        assert!(a.connect.is_none());
+    }
+
+    #[test]
+    fn enter_submits_exact_commands_and_arguments_unchanged() {
+        for input in ["/find", "/theme unknown", "/unknown", "/save \"unclosed"] {
+            let mut a = app();
+            a.focus = Focus::Chat;
+            a.compose_insert(input);
+            a.key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+            assert!(matches!(a.level, Level::Error));
+            assert_eq!(a.composer.trim(), input);
+            assert!(!a.messages.iter().any(|message| message.role == "you"));
+        }
+    }
+
+    #[test]
+    fn unnamed_save_commands_and_shortcut_prompt_for_filename() {
+        for input in ["/sa", "/save", ""] {
+            let mut a = app();
+            a.document.insert("unsaved");
+            if input.is_empty() {
+                a.key(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL));
+            } else {
+                a.focus = Focus::Chat;
+                a.compose_insert(input);
+                a.key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+            }
+            assert!(a.save_prompt.is_some());
+            assert!(a.document.path.is_none());
+            a.key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+            assert!(a.save_prompt.is_none());
+            assert_eq!(a.document.text, "unsaved");
+            assert!(a.document.dirty());
+        }
+    }
+
+    #[test]
+    fn filename_popup_saves_accepted_text_and_named_shortcut_skips_popup() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut a = app();
+        a.workspace = dir.path().to_owned();
+        a.document.insert("hello");
+        a.command("/demo").unwrap();
+        a.command("/save").unwrap();
+        a.paste("draft 界 name.md");
+        a.key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert!(a.save_prompt.is_none());
+        assert_eq!(
+            fs::read_to_string(dir.path().join("draft 界 name.md")).unwrap(),
+            "hello"
+        );
+        assert!(a.proposal.is_some());
+        assert!(!a.document.dirty());
+        a.key(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL));
+        assert!(a.save_prompt.is_none());
+    }
+
+    #[test]
+    fn filename_popup_retries_empty_missing_parent_and_existing_paths() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join("existing.md"), "original").unwrap();
+        let mut a = app();
+        a.workspace = dir.path().to_owned();
+        a.document.insert("unsaved");
+        a.command("/save").unwrap();
+        a.key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert_eq!(
+            a.save_prompt.as_ref().unwrap().error.as_deref(),
+            Some("Enter a filename")
+        );
+        for path in ["missing/draft.md", "existing.md"] {
+            a.save_prompt.as_mut().unwrap().input.clear();
+            a.save_prompt.as_mut().unwrap().cursor = 0;
+            a.paste(path);
+            a.key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+            assert!(a.save_prompt.as_ref().unwrap().error.is_some());
+            assert!(a.document.path.is_none());
+            assert!(a.document.dirty());
+            assert_eq!(a.save_prompt.as_ref().unwrap().input, path);
+        }
+        assert_eq!(
+            fs::read_to_string(dir.path().join("existing.md")).unwrap(),
+            "original"
+        );
+    }
+
+    #[test]
+    fn filename_popup_is_unicode_editable_and_paste_never_submits() {
+        let mut a = app();
+        a.document.insert("unchanged");
+        a.compose_insert("draft prompt");
+        a.command("/save").unwrap();
+        a.paste("界e\u{301}\n.md\r");
+        a.key(KeyEvent::new(KeyCode::Home, KeyModifiers::NONE));
+        a.key(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE));
+        a.key(KeyEvent::new(KeyCode::Delete, KeyModifiers::NONE));
+        assert_eq!(a.save_prompt.as_ref().unwrap().input, "界.md");
+        a.key(KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE));
+        assert_eq!(a.save_prompt.as_ref().unwrap().input, ".md");
+        assert_eq!(a.document.text, "unchanged");
+        assert_eq!(a.composer, "draft prompt");
+        assert!(a.document.path.is_none());
+    }
+
+    #[test]
+    fn unnamed_save_and_continue_resumes_pending_operation() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut a = app();
+        a.workspace = dir.path().to_owned();
+        a.document.insert("unsaved");
+        a.request(Pending::Quit);
+        a.confirm_choice(0);
+        assert!(a.save_prompt.is_some());
+        a.key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        assert!(a.pending.is_some());
+        assert!(!a.quit);
+        a.confirm_choice(0);
+        a.paste("saved.md");
+        a.key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert!(a.quit);
+        assert!(a.pending.is_none());
+        assert_eq!(
+            fs::read_to_string(dir.path().join("saved.md")).unwrap(),
+            "unsaved"
+        );
+    }
+
     #[test]
     fn rejection_preserves_document() {
         let mut a = app();

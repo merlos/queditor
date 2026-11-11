@@ -93,25 +93,47 @@ supported; this is not a universal no-retention guarantee.
 
 Every agent has a remembered mode. Chat mode is read-only and does not expose
 `propose_edit`; it can answer, critique, and describe suggested revisions. Agent
-mode exposes `propose_edit` for a complete replacement of the open document. It
-never directly applies or saves changes. Queditor checks original text/revision
-again after successful turn completion. Stale revisions, failure, truncation, or
-cancellation never stage/apply generated edits.
+mode exposes `propose_edit` for a complete replacement of the open document.
+**On successful completion, Queditor validates the snapshot, applies the edit and
+saves the whole file before review**, including existing unsaved text. Unnamed
+documents use private temporary backing without changing their “[Untitled]” identity.
+Ctrl+S or `/save` opens Save As; once saved to a real filename, subsequent edits and
+review Undo use that file. Temporary backing is cleaned up when the document closes.
+With recovery enabled, untitled text is still checkpointed for explicit restoration.
+Stale revisions, failure,
+truncation, cancellation, and failed disk-baseline/save checks never apply generated edits.
+Ordinary assistant text cannot change files; there are no arbitrary write tools.
 
-Live results appear as a non-modal review layer over the normal editor. Alt+] and
-Alt+[ navigate changes, Ctrl+Enter keeps one, and Ctrl+Backspace rejects one;
-`/changes keep` and `/changes reject` are alternatives for terminals without
-enhanced-keyboard support. `/changes keep-all` and `/changes reject-all` resolve everything. Ordinary typing,
-Enter, and Escape never accept a change. Partial choices are composed against the
-original snapshot and applied as one validated, undoable edit when review completes.
-Manual document editing closes a stale review layer while preserving the user's edit.
-Saving remains separate.
+The unified inline diff remains editable and shows both line-number columns, red
+removals, green additions, and word-level highlights. Alt+] and Alt+[ navigate changes;
+Ctrl+Enter or `/changes keep` clears a change's pending review state. Ctrl+Backspace
+or `/changes undo` reverts and saves that change. Use `keep-all` or `undo-all` for all
+pending changes; `reject`/`reject-all` are aliases for Undo. Full context is the default;
+`/changes collapse` and `/changes expand` toggle three-line context/full document.
+Removed lines and diff headers have no editable cursor position.
+Moving the cursor into a change selects and highlights it; clicking a removed line
+or change header selects its block without moving the text cursor. Clicking a
+block's `Ctrl+Enter Keep` or `Ctrl+Backspace Undo` label acts on that block directly,
+without holding Ctrl. In unchanged context the last selected block stays active.
+
+Manual edits outside a pending change rebase its positions. Touching a pending change
+protects it from review Undo; other changes remain reviewable. Ordinary typing and
+editor undo/redo are unsaved until Ctrl+S. Keep does not save later manual text, but
+review Undo saves the complete current file, including preserved manual text. An
+external disk change blocks Undo rather than overwriting it. Initial application
+and an all-change reversal each form one undoable editor transaction.
+
+Pending edits are already on disk and visible to external preview, sync, or publishing
+tools. Review before publishing; Undo cannot reverse external effects. Leaving review
+or exiting does not revert saved edits. Offline `/demo` and `/rewrite` still produce
+unsaved mock previews with explicit acceptance; they do not invoke a model.
 
 Escape from either pane always stops active generation, streaming, tool execution,
 provider waits, or permission waits and drops pending tool/proposal events. `/cancel`
 and Ctrl+C in chat remain alternatives. Partial output remains visibly
 marked incomplete/cancelled and is not committed as model history. Cancellation
-cannot undo provider processing or earlier transmissions.
+cannot undo provider processing or earlier transmissions, or revert a completed saved
+edit. Use review Undo for pending saved changes.
 
 Limits: 8 generation rounds, 12 tool calls, 256 KiB attachments/open documents/file
 reads/proposed replacements, 1000 directory entries, 1 MiB generated/tool context, 120-second
@@ -148,7 +170,12 @@ not a complete OS sandbox or a guarantee innocuously named files contain no secr
 On Linux/macOS, state lives in `$XDG_STATE_HOME/queditor/` or
 `~/.local/state/queditor/`. On Windows it lives in `%LOCALAPPDATA%\queditor`:
 
-- `recovery-<instance-id>.json`: accepted unsaved text, cursor, path and save baseline.
+- `recovery-<instance-id>.json`: unsaved text, cursor, path and save baseline.
+- Additional `recovery-<uuid>.json` records: independent pre-agent-edit snapshots,
+  retained after Keep and clean exit. With recovery enabled, a checkpoint must be
+  written before automatic save; storage failure blocks application. The saved-file
+  baseline is refreshed after success so restoring pre-edit text can be saved back
+  if the file has not subsequently changed. Later disk changes still block overwrite.
 - `session-<session-id>.json`: transcript, committed history, model/agent and workspace.
 - `permissions.json`: explicitly persistent grants only.
 
@@ -164,7 +191,10 @@ SIGKILL cannot run cleanup and may lose input since the last checkpoint.
 `/recover` lists IDs. `/recover <id>` restores into the editor after dirty-content
 confirmation. Inspect and save explicitly; external-change checks still apply.
 `/recover delete <id>` deletes an old snapshot. `recovery: false` disables new
-document checkpoints, without deleting existing records.
+document checkpoints (including pre-agent-edit snapshots), without deleting existing
+records. In-memory undo remains available, but disabling recovery removes the durable
+pre-edit safeguard. Pre-edit records may contain sensitive text; delete them explicitly
+when no longer needed. Recovery restores into the editor, never directly to disk.
 
 Session persistence defaults **off** because history can contain approved file
 contents and private prompts. `persist_sessions: true` enables checkpoints and
@@ -173,4 +203,5 @@ a new session without changing the editor document. Temporary grants/current
 attachments are not restored. Restored history may be sent to its model on the
 next prompt. `/sessions delete <id>` deletes an old session; start `/new` before
 deleting a session still being checkpointed. Undo history and pending proposals
-are not persisted.
+are not persisted. Already-saved agent changes remain in their files; reopening a
+file does not recreate its pending review highlights.

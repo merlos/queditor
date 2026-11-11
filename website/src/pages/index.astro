@@ -8,10 +8,10 @@ const url = (path: string) => `${base}${path.replace(/^\//, '')}`;
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width" />
-    <meta name="description" content="Queditor is a terminal editor where every AI edit waits for your review." />
+    <meta name="description" content="Queditor is a terminal editor with automatically saved AI edits and inline Keep/Undo review." />
     <meta name="theme-color" content="#0a0c09" />
     <meta property="og:title" content="Queditor — AI edits, on your terms" />
-    <meta property="og:description" content="A terminal editor where every AI edit waits for your review." />
+    <meta property="og:description" content="A terminal editor with automatically saved AI edits and inline Keep/Undo review." />
     <meta property="og:type" content="website" />
     <meta property="og:url" content={new URL(base, Astro.site)} />
     <meta name="twitter:card" content="summary" />
@@ -37,7 +37,7 @@ const url = (path: string) => `${base}${path.replace(/^\//, '')}`;
         <div class="hero-copy">
           <p class="eyebrow"><span></span> A terminal editor with boundaries</p>
           <h1>AI edits,<br /><em>on your terms.</em></h1>
-          <p class="lede">Write Markdown and text at terminal speed. Ask for help when you want it. Every suggested change waits in a diff until you explicitly accept it.</p>
+          <p class="lede">Write Markdown and text at terminal speed. Live Agent edits apply and save automatically. Review them inline, keep what works, and undo what doesn't.</p>
           <div class="actions">
             <a class="primary" href="https://github.com/merlos/queditor/releases">Download Queditor <span>↓</span></a>
             <a class="secondary" href={url('docs/')}>Read the docs →</a>
@@ -53,22 +53,23 @@ const url = (path: string) => `${base}${path.replace(/^\//, '')}`;
               <pre><span class="line">1</span> <strong># A better way to write</strong>
 <span class="line">2</span>
 <span class="line">3</span> Ideas should move quickly.
-<span class="line">4</span> <mark>But every change should stay yours.</mark>
+<span class="minus">4   − But every change should stay yours.</span>
+<span class="plus">  4 + Move fast. Keep the final say.</span>
 <span class="line">5</span>
 <span class="line">6</span> <span class="cursor"> </span></pre>
+              <div class="review">SAVED · Ctrl+Enter Keep · Ctrl+Backspace Undo</div>
             </div>
             <div class="chat-pane">
-              <div class="pane-label">ASSISTANT <b>reviewer</b></div>
-              <p class="prompt">› Make this sharper without changing the meaning.</p>
+              <div class="pane-label">Agent</div>
+              <p class="prompt"><b>You:</b><br />Make this sharper without changing the meaning.</p>
               <div class="proposal">
-                <small>PROPOSED EDIT</small>
-                <p class="minus">− But every change should stay yours.</p>
-                <p class="plus">+ Move fast. Keep the final say.</p>
+                <small>Planner:</small>
+                <p>Opening revised. Inspect the saved diff.</p>
               </div>
-              <div class="review"><span>A</span> accept <span>R</span> reject</div>
+              <p class="prompt">› Ask a follow-up…<br /><small>Model: ollama::llama3.2</small></p>
             </div>
           </div>
-          <div class="status"><span>NORMAL</span><span>Ln 6, Col 1</span><span>mock · reviewer</span></div>
+          <div class="status"><span>EDITOR</span><span>Ln 6, Col 1</span><span>Planner</span></div>
         </div>
       </section>
 
@@ -76,19 +77,19 @@ const url = (path: string) => `${base}${path.replace(/^\//, '')}`;
         <p class="section-kicker">BUILT FOR CONTROL</p>
         <h2>Assistance without surrender.</h2>
         <div class="cards">
-          <article><span>01</span><h3>Review every edit</h3><p>Assistant output becomes a staged proposal, never an automatic document mutation. Inspect the diff before accepting.</p></article>
-          <article><span>02</span><h3>Share context deliberately</h3><p>Only attached snapshots and approved tool results go to a live provider. Stale context cannot overwrite newer work.</p></article>
-          <article><span>03</span><h3>Choose your model</h3><p>Use offline mock mode, local Ollama, or supported cloud providers through one consistent review workflow.</p></article>
+          <article><span>01</span><h3>Keep or undo inline</h3><p>Completed Agent edits apply and save before review. Inspect red removals and green additions while the file stays editable. Pending edits are already on disk.</p></article>
+          <article><span>02</span><h3>Share context deliberately</h3><p>Chat shares selections or pinned snapshots. Agent mode sends the complete open document. File tools require approval; stale results cannot overwrite newer work.</p></article>
+          <article><span>03</span><h3>Choose your model</h3><p>Use local Ollama or supported cloud providers for live edits. Default offline mock mode offers unsaved demonstrations, not live AI.</p></article>
         </div>
       </section>
 
       <section class="workflow wrap">
         <div><p class="section-kicker">ONE SAFE LOOP</p><h2>Attach. Ask.<br />Review. Decide.</h2></div>
         <ol>
-          <li><b>01</b><div><strong>Select and attach</strong><p>Pin the exact text you want the assistant to see.</p></div></li>
+          <li><b>01</b><div><strong>Choose Chat or Agent</strong><p>Discuss selected context read-only, or enable full-document Agent edits. Untitled documents use private temporary backing until you choose a filename.</p></div></li>
           <li><b>02</b><div><strong>Ask for a revision</strong><p>Keep editing while the response streams.</p></div></li>
-          <li><b>03</b><div><strong>Inspect the proposal</strong><p>Queditor presents additions and deletions as a focused diff.</p></div></li>
-          <li><b>04</b><div><strong>Accept or reject</strong><p>Your document changes only after an explicit review action.</p></div></li>
+          <li><b>03</b><div><strong>Inspect the saved diff</strong><p>Validated edits automatically save the whole file, including unsaved text. Review before previewing, synchronizing, or publishing.</p></div></li>
+          <li><b>04</b><div><strong>Keep or undo</strong><p>Keep clears review highlights. Undo saves a reversal, preserving manual edits. Enabled recovery retains pre-edit snapshots.</p></div></li>
         </ol>
       </section>
 

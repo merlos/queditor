@@ -17,7 +17,7 @@ struct Snapshot {
     anchor: Option<usize>,
 }
 
-#[derive(Debug, Default)]
+#[derive(Clone, Debug, Default)]
 pub struct Document {
     pub text: String,
     pub cursor: usize,
@@ -28,6 +28,7 @@ pub struct Document {
     disk_baseline: Option<String>,
     undo: Vec<Snapshot>,
     redo: Vec<Snapshot>,
+    temporary: Option<std::sync::Arc<tempfile::TempDir>>,
 }
 
 #[derive(Clone, serde::Serialize, serde::Deserialize)]
@@ -66,6 +67,11 @@ impl Document {
             path: r.path,
             ..Self::default()
         };
+        if d.path.is_none() {
+            // A temporary auto-save is not a user-named save after recovery.
+            d.saved.clear();
+            d.disk_baseline = None;
+        }
         d.move_to(r.cursor, false);
         Ok(d)
     }
@@ -86,7 +92,7 @@ impl Document {
     }
 
     pub fn dirty(&self) -> bool {
-        self.text != self.saved
+        self.text != self.saved || self.temporary.is_some()
     }
 
     pub fn selection(&self) -> Option<std::ops::Range<usize>> {
@@ -160,6 +166,32 @@ impl Document {
         let text = normalize_newlines(text, self.text.contains("\r\n"));
         let range = self.selection().unwrap_or(self.cursor..self.cursor);
         self.replace(range, &text);
+    }
+
+    /// Commit an undoable edit only if its automatic save succeeds.
+    pub fn replace_and_save(&mut self, range: std::ops::Range<usize>, text: &str) -> Result<()> {
+        let mut candidate = self.clone();
+        if candidate.path.is_none() && candidate.temporary.is_none() {
+            candidate.disk_baseline = None;
+            let directory = tempfile::Builder::new()
+                .prefix("queditor-agent-")
+                .tempdir()
+                .context("Cannot create private temporary document")?;
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                fs::set_permissions(directory.path(), fs::Permissions::from_mode(0o700))?;
+            }
+            candidate.temporary = Some(std::sync::Arc::new(directory));
+        }
+        candidate.replace(range, text);
+        candidate.save(None)?;
+        *self = candidate;
+        Ok(())
+    }
+
+    pub fn is_temporary(&self) -> bool {
+        self.temporary.is_some()
     }
 
     pub fn backspace(&mut self) {
@@ -322,12 +354,18 @@ impl Document {
     }
 
     pub fn save(&mut self, requested: Option<&Path>) -> Result<()> {
+        let backing = self
+            .temporary
+            .as_ref()
+            .map(|dir| dir.path().join("document.md"));
         let path = absolute(
             requested
                 .or(self.path.as_deref())
+                .or(backing.as_deref())
                 .context("Use /save <path> for an unnamed document")?,
         )?;
-        let same = self.path.as_ref().is_some_and(|p| p == &path);
+        let same = self.path.as_ref().is_some_and(|p| p == &path)
+            || backing.as_ref().is_some_and(|p| p == &path);
         if path.exists() {
             if !same {
                 bail!("Refusing to overwrite another file: {}", path.display());
@@ -361,7 +399,10 @@ impl Document {
                 .map_err(|e| e.error)
                 .context("Cannot create destination without overwriting")?;
         }
-        self.path = Some(path);
+        if requested.is_some() || self.path.is_some() {
+            self.path = Some(path);
+            self.temporary = None;
+        }
         self.saved = self.text.clone();
         self.disk_baseline = Some(self.text.clone());
         Ok(())
@@ -447,6 +488,70 @@ pub fn display_width(text: &str) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn temporary_auto_save_is_private_promotes_to_real_path_and_cleans_up() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut document = Document::default();
+        document.replace_and_save(0..0, "draft").unwrap();
+        assert!(document.path.is_none());
+        assert!(document.dirty());
+        let backing = document
+            .temporary
+            .as_ref()
+            .unwrap()
+            .path()
+            .join("document.md");
+        assert_eq!(fs::read_to_string(&backing).unwrap(), "draft");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(
+                fs::metadata(&backing).unwrap().permissions().mode() & 0o777,
+                0o600
+            );
+            assert_eq!(
+                fs::metadata(backing.parent().unwrap())
+                    .unwrap()
+                    .permissions()
+                    .mode()
+                    & 0o777,
+                0o700
+            );
+        }
+        let recovered = Document::from_recovery(document.recovery()).unwrap();
+        assert!(recovered.path.is_none());
+        assert!(recovered.dirty());
+        let real = dir.path().join("real.md");
+        document.save(Some(&real)).unwrap();
+        assert!(!document.is_temporary());
+        assert!(!backing.exists());
+        assert!(!document.dirty());
+        document.replace_and_save(0..5, "next").unwrap();
+        assert_eq!(fs::read_to_string(&real).unwrap(), "next");
+    }
+
+    #[test]
+    fn auto_save_failure_preserves_text_cursor_history_and_disk() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("draft.md");
+        fs::write(&path, "old").unwrap();
+        let mut document = Document::open(&path).unwrap();
+        document.insert("manual");
+        let before = document.recovery();
+        let revision = document.revision;
+        fs::write(&path, "external").unwrap();
+        assert!(
+            document
+                .replace_and_save(0..document.text.len(), "new")
+                .is_err()
+        );
+        assert_eq!(document.text, before.text);
+        assert_eq!(document.cursor, before.cursor);
+        assert_eq!(document.revision, revision);
+        assert_eq!(fs::read_to_string(&path).unwrap(), "external");
+        document.undo();
+        assert_eq!(document.text, "old");
+    }
     #[test]
     fn grapheme_editing_and_history() {
         let mut d = Document::default();

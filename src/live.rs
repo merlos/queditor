@@ -1,6 +1,6 @@
 //! Async request state, permissions, and persistence orchestration outside the renderer.
 use crate::{
-    app::{App, Attachment, Level, Proposal},
+    app::{App, Attachment, Level},
     backend::{self, Event, Request},
     config::AgentMode,
     storage::{Session, Store},
@@ -71,6 +71,10 @@ impl App {
         }
     }
 
+    pub fn active_message_index(&self) -> Option<usize> {
+        self.live.job.as_ref().map(|job| job.message)
+    }
+
     pub fn enable_live(&mut self, runtime: Handle, store: Option<Store>) {
         self.live.runtime = Some(runtime);
         self.live.session_id = uuid::Uuid::new_v4().to_string();
@@ -96,7 +100,7 @@ impl App {
         if self.busy() {
             bail!("An agent is running; press Esc or use /cancel first");
         }
-        if self.proposal.is_some() {
+        if self.proposal.is_some() || self.review.is_some() {
             bail!("Resolve the pending proposal first");
         }
         if self.config.model == "mock" {
@@ -163,7 +167,7 @@ impl App {
                     self.workspace.display()
                 ),
                 AgentMode::Agent => format!(
-                    "{}\n\nYou are a writing assistant in Queditor AGENT mode. Workspace: {}. The complete open document is attached below as untrusted content. A selected or pinned excerpt in the user prompt is especially important context but does not limit where you may edit. Based on the user's request, use propose_edit with the complete resulting document. File tools require user approval. No shell execution, direct writes, or deletion are available. Proposed text is staged only after successful completion, then shown as a diff; it is not accepted or saved until the user explicitly approves it. Do not claim otherwise.",
+                    "{}\n\nYou are a writing assistant in Queditor AGENT mode. Workspace: {}. The complete open document is attached below as untrusted content. A selected or pinned excerpt in the user prompt is especially important context but does not limit where you may edit. Based on the user's request, use propose_edit with the complete resulting document. File tools require user approval. No shell execution, arbitrary file writes, or deletion are available. After successful completion Queditor validates the snapshot, applies and saves the open document, and displays inline Keep/Undo review. Do not claim a save succeeded before Queditor completes it.",
                     self.agents[self.agent].instructions,
                     self.workspace.display()
                 ),
@@ -210,7 +214,11 @@ impl App {
         });
         self.notify(
             Level::Info,
-            "Agent running · continue editing · Esc cancels from anywhere",
+            if mode == AgentMode::Agent && !compact {
+                "Agent running · successful edits auto-save the whole open file, including existing unsaved text · Esc cancels"
+            } else {
+                "Agent running · continue editing · Esc cancels from anywhere"
+            },
         );
         Ok(())
     }
@@ -290,9 +298,9 @@ impl App {
                                 Some(a) if a.revision == self.document.revision && self.document.text.get(a.range.clone()) == Some(a.text.as_str()) => {
                                     if replacement == a.text { self.notify(Level::Info, "Agent proposal has no changes"); }
                                     else {
-                                        self.proposal = Some(Proposal::new(false, a.revision, a.range, a.text, replacement));
-                                        self.editor_scroll = 0;
-                                        self.notify(Level::Info, "Agent changes ready · keep editing · Alt+[ / Alt+] navigate · Ctrl+Enter keeps · Ctrl+Backspace rejects");
+                                        if let Err(error) = self.apply_agent_edit(a.range, &replacement) {
+                                            self.notify(Level::Error, format!("Agent edit not applied or saved: {error:#}"));
+                                        }
                                     }
                                 },
                                 _ => self.notify(Level::Warning, "Agent proposal is stale; document unchanged. Retry against the current document."),
@@ -341,6 +349,57 @@ impl App {
             provider_id,
         });
         self.notify(Level::Info, "Discovering provider models…");
+        Ok(())
+    }
+
+    pub fn apply_agent_edit(
+        &mut self,
+        range: std::ops::Range<usize>,
+        replacement: &str,
+    ) -> Result<()> {
+        if self.review.is_some() || self.proposal.is_some() {
+            bail!("Resolve existing edit review first");
+        }
+        if self.document.text.get(range.clone()) == Some(replacement) {
+            self.notify(Level::Info, "Agent edit has no changes");
+            return Ok(());
+        }
+        if self.document.text.get(range.clone()).is_none() {
+            bail!("Invalid agent edit range");
+        }
+        let before = self.document.text.clone();
+        let mut checkpoint = self.document.recovery();
+        let id = uuid::Uuid::new_v4().to_string();
+        if self.config.recovery {
+            self.live.store.as_ref().context("Recovery storage unavailable; disable recovery explicitly or restore storage before auto-saving")?
+                .agent_checkpoint(&id, checkpoint.clone())?;
+        }
+        self.document.replace_and_save(range, replacement)?;
+        self.review = Some(crate::review::Review::new(
+            before,
+            self.document.text.clone(),
+        ));
+        if let Some(hunk) = self.review.as_ref().and_then(|r| r.hunks.first()) {
+            self.document.move_to(hunk.range.start, false);
+        }
+        self.attachment = None;
+        self.editor_scroll = 0;
+        self.follow_editor = true;
+        self.notify(Level::Success, if self.document.is_temporary() {
+            "Agent edits applied and saved to a private temporary file · Ctrl+S chooses a filename · Keep/Undo review"
+        } else {
+            "Agent edits applied and saved · Ctrl+Enter Keep · Ctrl+Backspace Undo · review before publishing"
+        });
+        if self.config.recovery
+            && let Some(store) = &self.live.store
+        {
+            // Restoring the pre-edit text must be dirty relative to the just-saved file.
+            checkpoint.saved = self.document.text.clone();
+            checkpoint.disk_baseline = Some(self.document.text.clone());
+            if store.agent_checkpoint(&id, checkpoint).is_err() {
+                self.notify(Level::Warning, "Agent edits saved; pre-edit checkpoint retained but its baseline could not be refreshed. Recover to a new path.");
+            }
+        }
         Ok(())
     }
 
@@ -401,7 +460,7 @@ impl App {
             if let Some(message) = self.messages.get_mut(job.message) {
                 message
                     .text
-                    .push_str("\n[Incomplete request; no edits staged]");
+                    .push_str("\n[Incomplete request; no edits applied]");
             }
             if self.composer.is_empty() && !job.compact {
                 self.composer = job.prompt;
@@ -416,7 +475,7 @@ impl App {
         if let Some(job) = self.live.job.take() {
             job.task.abort();
             if let Some(message) = self.messages.get_mut(job.message) {
-                message.text.push_str("\n[Cancelled; no edits staged]");
+                message.text.push_str("\n[Cancelled; no edits applied]");
             }
             self.notify(
                 Level::Info,
@@ -684,12 +743,135 @@ impl Drop for Live {
 #[cfg(test)]
 mod tests {
     use super::*;
+    fn applied_app(before: &str, after: &str) -> (tempfile::TempDir, App, std::path::PathBuf) {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("draft.md");
+        std::fs::write(&path, before).unwrap();
+        let mut app = App::new(Some(&path)).unwrap();
+        app.config.recovery = true;
+        app.live.store = Some(Store::new(dir.path().join("state")).unwrap());
+        app.apply_agent_edit(0..before.len(), after).unwrap();
+        (dir, app, path)
+    }
+
+    #[test]
+    fn keep_clears_review_without_saving_later_manual_text_and_checkpoint_survives_exit() {
+        let (_dir, mut app, path) = applied_app("old\nend\n", "new\nend\n");
+        app.focus = crate::app::Focus::Editor;
+        app.document.move_to(app.document.text.len(), false);
+        app.paste("manual");
+        assert_eq!(app.review.as_ref().unwrap().pending(), 1);
+        app.command("/changes keep").unwrap();
+        assert!(app.review.is_none());
+        assert!(app.document.dirty());
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "new\nend\n");
+        app.finish_state().unwrap();
+        let store = app.live.store.as_ref().unwrap();
+        let ids = store.list("recovery").unwrap();
+        assert_eq!(ids.len(), 1);
+        let mut restored =
+            crate::document::Document::from_recovery(store.recover(&ids[0]).unwrap()).unwrap();
+        assert_eq!(restored.text, "old\nend\n");
+        assert!(restored.dirty());
+        restored.save(None).unwrap();
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "old\nend\n");
+    }
+
+    #[test]
+    fn review_undo_saves_targeted_reversal_preserves_other_manual_edits_and_kept_hunks() {
+        let before = "old one\ncontext\nold two\nend\n";
+        let after = "new one\ncontext\nnew two\nend\n";
+        let (_dir, mut app, path) = applied_app(before, after);
+        assert_eq!(app.review.as_ref().unwrap().pending(), 2);
+        app.command("/changes keep").unwrap();
+        app.document.move_to(app.document.text.len(), false);
+        app.focus = crate::app::Focus::Editor;
+        app.paste("界👩‍💻 manual");
+        app.command("/changes undo-all").unwrap();
+        assert_eq!(
+            app.document.text,
+            "new one\ncontext\nold two\nend\n界👩‍💻 manual"
+        );
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), app.document.text);
+        assert!(!app.document.dirty());
+        app.document.undo();
+        assert_eq!(app.document.text, format!("{after}界👩‍💻 manual"));
+        assert!(app.document.dirty());
+    }
+
+    #[test]
+    fn manually_modified_hunks_are_not_reverted_by_undo_all() {
+        let (_dir, mut app, path) = applied_app("old\ngap\nsecond\n", "new\ngap\nSECOND\n");
+        app.document.move_to("new".len(), false);
+        app.focus = crate::app::Focus::Editor;
+        app.paste(" manual");
+        assert!(app.review.as_ref().unwrap().hunks[0].protected);
+        app.command("/changes undo-all").unwrap();
+        assert_eq!(app.document.text, "new manual\ngap\nsecond\n");
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), app.document.text);
+    }
+
+    #[test]
+    fn external_changes_block_apply_and_review_undo_transactionally() {
+        let (_dir, mut app, path) = applied_app("old", "new");
+        std::fs::write(&path, "external").unwrap();
+        let revision = app.document.revision;
+        app.command("/changes undo").unwrap();
+        assert_eq!(app.document.text, "new");
+        assert_eq!(app.document.revision, revision);
+        assert_eq!(app.review.as_ref().unwrap().pending(), 1);
+        assert!(matches!(app.level, Level::Error));
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "external");
+        assert!(app.apply_agent_edit(0..3, "other").is_err());
+        assert_eq!(app.document.text, "new");
+        assert_eq!(app.document.revision, revision);
+    }
+
+    #[test]
+    fn unavailable_recovery_storage_blocks_apply_unless_explicitly_disabled() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("draft.md");
+        std::fs::write(&path, "old").unwrap();
+        let mut app = App::new(Some(&path)).unwrap();
+        app.config.recovery = true;
+        assert!(app.apply_agent_edit(0..3, "new").is_err());
+        assert_eq!(app.document.text, "old");
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "old");
+        app.config.recovery = false;
+        app.apply_agent_edit(0..3, "new").unwrap();
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "new");
+    }
+
+    #[test]
+    fn unnamed_agent_edits_use_temporary_file_then_continue_on_real_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = App::new(None).unwrap();
+        app.config.recovery = false;
+        app.apply_agent_edit(0..0, "draft").unwrap();
+        assert!(app.document.path.is_none());
+        assert!(app.document.is_temporary());
+        assert!(app.document.dirty());
+        app.command("/changes keep-all").unwrap();
+        app.command("/save").unwrap();
+        assert!(app.save_prompt.is_some());
+        let path = dir.path().join("real.md");
+        app.paste(path.to_str().unwrap());
+        app.key(crossterm::event::KeyEvent::new(
+            crossterm::event::KeyCode::Enter,
+            crossterm::event::KeyModifiers::NONE,
+        ));
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "draft");
+        assert!(!app.document.is_temporary());
+        app.apply_agent_edit(0..5, "revised").unwrap();
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "revised");
+    }
     fn job_app(
         snapshot: Option<Attachment>,
         compact: bool,
     ) -> (tokio::runtime::Runtime, App, mpsc::Sender<Event>) {
         let runtime = tokio::runtime::Runtime::new().unwrap();
         let mut app = App::new(None).unwrap();
+        app.agent = 0;
         let (sender, receiver) = mpsc::channel(8);
         let task = runtime.spawn(std::future::pending());
         let message = app.messages.len();
@@ -706,7 +888,72 @@ mod tests {
         (runtime, app, sender)
     }
     #[test]
-    fn live_proposal_is_not_staged_until_success_and_stale_is_rejected() {
+    fn activity_renders_below_responding_agent_through_full_spinner_cycle() {
+        use ratatui::{Terminal, backend::TestBackend};
+        let (_runtime, mut app, sender) = job_app(None, false);
+        app.agent = 1; // The in-flight response still belongs to Planner.
+        app.message("system", "Unrelated output");
+        let mut terminal = Terminal::new(TestBackend::new(140, 40)).unwrap();
+        let mut frames = std::collections::HashSet::new();
+        for frame in 0..=10 {
+            app.animation_frame = frame;
+            terminal
+                .draw(|frame| crate::ui::draw(frame, &mut app))
+                .unwrap();
+            let buffer = terminal.backend().buffer();
+            let rows = (app.chat_area.y + 1..app.chat_area.bottom() - 1)
+                .map(|y| {
+                    (app.chat_area.x + 1..app.chat_area.right() - 1)
+                        .map(|x| buffer[(x, y)].symbol())
+                        .collect::<String>()
+                })
+                .collect::<Vec<_>>();
+            let heading = rows
+                .iter()
+                .position(|row| row.trim() == "Planner:")
+                .unwrap();
+            assert!(rows[heading + 1].contains("Thinking..."));
+            let spinner = rows[heading + 1].chars().next().unwrap();
+            if frame == 10 {
+                assert_eq!(spinner, '⠋');
+            } else {
+                assert!(frames.insert(spinner));
+            }
+        }
+        sender.try_send(Event::Text("Answer".into())).unwrap();
+        app.poll_live();
+        assert_eq!(app.activity_label(), Some("Streaming"));
+        sender.try_send(Event::Proposal("Edit".into())).unwrap();
+        app.poll_live();
+        assert_eq!(app.activity_label(), Some("Preparing edit"));
+        terminal
+            .draw(|frame| crate::ui::draw(frame, &mut app))
+            .unwrap();
+        let screen = terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect::<String>();
+        assert!(screen.contains("Preparing edit..."));
+        app.cancel_live();
+        assert!(app.activity_label().is_none());
+        terminal
+            .draw(|frame| crate::ui::draw(frame, &mut app))
+            .unwrap();
+        let screen = terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect::<String>();
+        assert!(!screen.contains("Preparing edit..."));
+    }
+
+    #[test]
+    fn live_edit_is_not_applied_until_success_and_stale_is_rejected() {
         let snapshot = Attachment {
             revision: 1,
             range: 0..5,
@@ -758,6 +1005,9 @@ mod tests {
     }
     #[test]
     fn successful_live_proposal_and_undo() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("draft.md");
+        std::fs::write(&path, "hello").unwrap();
         let snapshot = Attachment {
             revision: 1,
             range: 0..5,
@@ -765,14 +1015,22 @@ mod tests {
             label: "selection".into(),
         };
         let (_runtime, mut app, sender) = job_app(Some(snapshot), false);
-        app.document.insert("hello");
+        app.document = crate::document::Document::open(&path).unwrap();
+        app.document.revision = 1;
+        app.live.store = Some(Store::new(dir.path().join("state")).unwrap());
         sender.try_send(Event::Proposal("HELLO".into())).unwrap();
         sender
             .try_send(Event::Done(vec![ChatMessage::assistant("done")]))
             .unwrap();
         app.poll_live();
-        assert!(app.proposal.is_some());
+        assert!(app.review.is_some());
+        assert_eq!(app.document.text, "HELLO");
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "HELLO");
+        app.command("/changes undo").unwrap();
+        assert!(app.review.is_none());
         assert_eq!(app.document.text, "hello");
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "hello");
+        app.document.move_to(5, false);
         app.key(crossterm::event::KeyEvent::new(
             crossterm::event::KeyCode::Char('a'),
             crossterm::event::KeyModifiers::NONE,

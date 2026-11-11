@@ -1,7 +1,7 @@
 # Queditor
 
 A Rust terminal Markdown/text editor with a side-by-side or stacked chat pane
-and explicit review of assistant edits.
+and VS Code-style inline Keep/Undo review of assistant edits.
 
 **Website and documentation:** <https://merlos.github.io/queditor/>
 
@@ -9,7 +9,8 @@ and explicit review of assistant edits.
 [`genai`](https://github.com/jeremychone/rust-genai), a multi-provider Rust library
 supporting OpenAI, Anthropic, Gemini, Ollama, OpenRouter, Groq, and more.
 Live requests send chat history, explicitly attached text, and approved file-tool
-results to the selected provider. Edits still require explicit review.
+results to the selected provider. **Live Agent edits apply and save automatically
+before review.** Keep confirms them; Undo reverts and saves them. Chat mode is read-only.
 
 ## Run
 
@@ -59,15 +60,24 @@ entering the UI. `queditor --help` shows CLI options.
 - **Tab** switches panes. **Ctrl+S** saves; **Ctrl+Q** exits safely.
 - In chat, **Enter** submits and **Ctrl+J** inserts a newline. Shift+Enter also
   works if your terminal reports it distinctly.
+- **Ctrl+A / Ctrl+E** move to line start/end and **Ctrl+K** deletes to line end
+  in both the editor and chat prompt, preserving the newline.
+- `/agents` opens a picker: use arrows/Enter or click an agent; Escape cancels.
 - `/files` browses files; `/open "a file.md"` opens/creates a document.
-- `/save "draft.md"` saves an unnamed document.
+- `/save` or **Ctrl+S** opens a filename popup for an unnamed document;
+  `/save "draft.md"` supplies the path directly.
 - Select text in the editor, switch to chat, and use `/attach` to pin a snapshot.
-- Use `/mode chat` for read-only discussion or `/mode agent` for full-document staged edits.
+- Use `/mode chat` for read-only discussion or `/mode agent` for full-document edits
+  that apply and save before review. Unnamed documents use a private temporary file;
+  Ctrl+S chooses the real filename, which subsequent edits use.
 - `/demo` creates a deterministic uppercase proposal, not an AI response.
 - **Alt+[ / Alt+]** navigates agent changes; **Ctrl+Enter** keeps one and
-  **Ctrl+Backspace** rejects one in terminals with enhanced-keyboard support.
-  `/changes keep` and `/changes reject` are portable alternatives. **Ctrl+Z**
-  undoes accepted changes.
+  **Ctrl+Backspace** undoes one in terminals with enhanced-keyboard support.
+  `/changes keep` and `/changes undo` are portable alternatives. Use `keep-all`
+  or `undo-all` for all pending edits. **Ctrl+Z** is ordinary unsaved editor undo.
+- `/changes collapse` shows three context lines; `/changes expand` restores full context.
+- During live review, moving the cursor into a change highlights and selects it.
+  Click a block's Keep/Undo shortcut label to act directly on that block.
 - `/rewrite "replacement text"` previews a replacement for selection/context,
   or the whole document when neither is present.
 - `/help` lists commands; `/keys` shows the current editing bindings.
@@ -80,7 +90,7 @@ entering the UI. `queditor --help` shows CLI options.
 - Wide/narrow layouts, status messages, file explorer, search/replace commands.
 - Mocha/daylight themes, VS Code-style and Emacs-style editing presets.
 - YAML configuration and custom Markdown agent definitions.
-- Attached context snapshots and stale-proposal checks.
+- Attached context snapshots, stale-edit checks, and manual-edit protection during review.
 - Temporary-file saves, newline preservation, and disk-change checks at save time.
 - Live streaming, cancellation, model switching, and conversation compaction.
 - Read/list tools with once/session/exact-path persistent permission choices.
@@ -99,12 +109,28 @@ You can still select or enter a model directly, for example
 For local Ollama, use `/models ollama::llama3.2` (the model must be installed).
 Use a model available to your account; tool/stream support varies by model.
 
-Chat mode answers and suggests without staging changes. In Agent mode the model may
-propose a complete replacement for the open document; selections remain important
-context rather than edit boundaries. Editing while it runs is allowed and stale
-results are rejected. Proposed changes appear as a non-modal editor overlay and can
-be kept/rejected individually or together. Escape always cancels active agent
-work; `/cancel` and Ctrl+C in chat remain available.
+Chat mode answers without changing files. In Agent mode the model may return a
+complete replacement for the open document; selections remain important
+context rather than edit boundaries. On successful completion, Queditor validates
+the snapshot, applies one undoable edit, and saves the **whole file, including any
+existing unsaved text**. External disk changes or save failures prevent application.
+The editable unified diff shows red removals, green additions, line numbers, and
+word highlights. Keep clears review state; Undo saves a targeted reversal. Manual
+edits touching a pending change protect it from review Undo; unrelated edits remain
+reviewable. Ordinary typing is not auto-saved, and Keep does not save later manual edits.
+With recovery enabled, an independent pre-edit checkpoint is retained for `/recover`.
+Escape cancels active generation; it does not revert already-saved edits. Use
+`/changes undo-all` to revert pending edits. `/demo` and `/rewrite` remain unsaved
+offline previews, not live AI edits.
+
+**Review before publishing:** pending live edits are already on disk and can be
+read by previewers, sync tools, or other applications. Undo cannot reverse those
+external effects.
+
+Unnamed documents stay “[Untitled]” and save to private temporary backing instead
+of asking for a filename before an Agent request. Ctrl+S opens Save As; after that,
+automatic saves and review Undo use the real file. Temporary backing is cleaned up
+when the document closes; recovery checkpoints remain available when enabled.
 
 See [provider setup and privacy](docs/live-ai.md) for authentication, custom
 endpoints, permissions, sessions, and recovery details.

@@ -1,5 +1,6 @@
 use crate::{
     app::{App, Focus, Level, Pending, composer_display_width, composer_rows},
+    config::AgentMode,
     document::{display_width, grapheme_width},
 };
 use ratatui::{
@@ -13,6 +14,8 @@ use std::ops::Range;
 use unicode_segmentation::UnicodeSegmentation;
 
 pub fn draw(frame: &mut Frame, app: &mut App) {
+    app.review_buttons.clear();
+    app.review_row_hunks.clear();
     let area = frame.area();
     let theme = app.theme;
     frame.render_widget(
@@ -27,7 +30,9 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
                 .wrap(ratatui::widgets::Wrap { trim: false }),
             area,
         );
-        if app.pending.is_some() {
+        if app.save_prompt.is_some() {
+            save_prompt(frame, app);
+        } else if app.pending.is_some() {
             confirmation(frame, app);
         } else if app.live.permission.is_some() {
             permission(frame, app);
@@ -35,6 +40,8 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
             connect(frame, app);
         } else if app.model_picker.is_some() {
             model_picker(frame, app);
+        } else if app.agent_picker.is_some() {
+            agent_picker(frame, app);
         }
         return;
     }
@@ -82,8 +89,7 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
     }
     let (row, col) = app.document.line_column();
     let status = format!(
-        " {} · {}:{} · {} · {} / {}{} · {}",
-        safe(&name),
+        " {}:{} · {} · {}",
         row + 1,
         col + 1,
         if app.focus == Focus::Editor {
@@ -92,9 +98,6 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
             "CHAT"
         },
         safe(&app.agents[app.agent].name),
-        safe(&app.config.model),
-        if app.busy() { " [running]" } else { "" },
-        app.config.theme
     );
     let level = match app.level {
         Level::Info => ("INFO", theme.muted),
@@ -102,9 +105,21 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
         Level::Warning => ("WARN", theme.yellow),
         Level::Error => ("ERROR", theme.red),
     };
-    let detail = if let Some(proposal) = &app.proposal {
+    let detail = if let Some(review) = &app.review {
         format!(
-            " REVIEW: Agent change {} of {} · Alt+[ / Alt+] navigate · Ctrl+Enter keep · Ctrl+Backspace reject",
+            " {} · {} pending · Change {} of {} · Alt+[ / Alt+] navigate · Ctrl+Enter Keep · Ctrl+Backspace Undo",
+            if app.document.is_temporary() {
+                "TEMP SAVED · Ctrl+S filename"
+            } else {
+                "SAVED"
+            },
+            review.pending(),
+            review.active + 1,
+            review.hunks.len()
+        )
+    } else if let Some(proposal) = &app.proposal {
+        format!(
+            " MOCK PREVIEW: Change {} of {} · Alt+[ / Alt+] navigate · Ctrl+Enter keep · Ctrl+Backspace reject",
             proposal.active_hunk + 1,
             proposal.hunks.len()
         )
@@ -116,7 +131,7 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
             Line::from(status),
             Line::styled(
                 detail,
-                Style::default().fg(if app.proposal.is_some() {
+                Style::default().fg(if app.proposal.is_some() || app.review.is_some() {
                     theme.yellow
                 } else {
                     level.1
@@ -125,7 +140,9 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
         ]),
         rows[1],
     );
-    if app.pending.is_some() {
+    if app.save_prompt.is_some() {
+        save_prompt(frame, app);
+    } else if app.pending.is_some() {
         confirmation(frame, app);
     } else if app.live.permission.is_some() {
         permission(frame, app);
@@ -133,6 +150,8 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
         connect(frame, app);
     } else if app.model_picker.is_some() {
         model_picker(frame, app);
+    } else if app.agent_picker.is_some() {
+        agent_picker(frame, app);
     }
 }
 
@@ -152,6 +171,12 @@ fn editor(frame: &mut Frame, app: &mut App) {
     if area.width == 0 || area.height == 0 {
         return;
     }
+    if app.review.is_some() {
+        review_editor(frame, app);
+        return;
+    }
+    app.review_gutter = 0;
+    app.review_view_rows.clear();
     let preview = proposal_preview(app);
     let source = preview
         .as_ref()
@@ -338,25 +363,409 @@ fn line_display_position(text: &str, offset: usize) -> (usize, usize) {
     (row, column)
 }
 
-fn chat(frame: &mut Frame, app: &mut App) {
-    let activity = app
-        .activity_label()
-        .map(|label| {
-            const FRAMES: [&str; 4] = ["⠋", "⠙", "⠹", "⠸"];
-            format!(
-                " · {label} {} · Esc cancels",
-                FRAMES[app.animation_frame % FRAMES.len()]
-            )
-        })
-        .unwrap_or_default();
-    let block = pane(
-        &format!(
-            " Chat · {} · {} · {}{} ",
-            safe(&app.agents[app.agent].name),
-            app.agent_mode().label(),
-            app.backend_label(),
-            activity
+fn diff_background(
+    base: ratatui::style::Color,
+    color: ratatui::style::Color,
+) -> ratatui::style::Color {
+    use ratatui::style::Color;
+    match (base, color) {
+        (Color::Rgb(r, g, b), Color::Rgb(x, y, z)) => Color::Rgb(
+            ((u16::from(r) * 4 + u16::from(x)) / 5) as u8,
+            ((u16::from(g) * 4 + u16::from(y)) / 5) as u8,
+            ((u16::from(b) * 4 + u16::from(z)) / 5) as u8,
         ),
+        _ => base,
+    }
+}
+
+/// Stronger highlights for the changed words within a paired replacement line.
+fn changed_words(text: &str, other: &str, added: bool) -> Vec<Range<usize>> {
+    use similar::ChangeTag;
+    let diff = if added {
+        similar::TextDiff::from_words(other, text)
+    } else {
+        similar::TextDiff::from_words(text, other)
+    };
+    let mut offset = 0;
+    let mut ranges = vec![];
+    for change in diff.iter_all_changes() {
+        let relevant = if added {
+            change.tag() != ChangeTag::Delete
+        } else {
+            change.tag() != ChangeTag::Insert
+        };
+        if relevant {
+            let end = offset + change.value().len();
+            if change.tag() != ChangeTag::Equal {
+                ranges.push(offset..end);
+            }
+            offset = end;
+        }
+    }
+    ranges
+}
+
+fn review_editor(frame: &mut Frame, app: &mut App) {
+    use similar::{ChangeTag, DiffTag, TextDiff};
+    let review = app.review.as_ref().unwrap();
+    let area = app.editor_area;
+    // Build an old side that retains kept and manual changes; only pending edits differ.
+    let mut old = app.document.text.clone();
+    for hunk in review.hunks.iter().rev().filter(|h| !h.resolved) {
+        old.replace_range(hunk.range.clone(), &hunk.original);
+    }
+    let new = &app.document.text;
+    let old_lines = old.split_inclusive('\n').collect::<Vec<_>>();
+    let new_lines = new.split_inclusive('\n').collect::<Vec<_>>();
+    let diff = TextDiff::from_lines(&old, new);
+    let digits = old_lines
+        .len()
+        .max(new_lines.len())
+        .max(1)
+        .to_string()
+        .len();
+    let gutter = (digits * 2 + 4).min(usize::from(area.width).saturating_sub(1));
+    app.review_gutter = gutter;
+    let width = usize::from(area.width).saturating_sub(gutter).max(1);
+    let context = if review.expanded {
+        old_lines.len().max(new_lines.len()) + 1
+    } else {
+        3
+    };
+    let mut lines = vec![];
+    let mut positions = vec![];
+    let mut row_hunks = vec![];
+    let mut buttons = vec![];
+    let mut cursor_visual = None;
+    let (cursor_row, cursor_col) = (app.document.line_column().0, app.document.display_column());
+    let selection = app.document.selection();
+    let mut new_offsets = vec![0];
+    for line in &new_lines {
+        new_offsets.push(new_offsets.last().unwrap() + line.len());
+    }
+    let mut previous_end = 0;
+    for group in diff.grouped_ops(context) {
+        let Some(first) = group.first() else {
+            continue;
+        };
+        let last = group.last().unwrap();
+        if !review.expanded && first.new_range().start > previous_end {
+            lines.push(Line::styled(
+                "… unchanged lines · /changes expand",
+                Style::default().fg(app.theme.muted),
+            ));
+            positions.push(None);
+            row_hunks.push(None);
+        }
+        lines.push(Line::styled(
+            format!(
+                "@@ -{},{} +{},{} @@",
+                first.old_range().start + 1,
+                last.old_range().end - first.old_range().start,
+                first.new_range().start + 1,
+                last.new_range().end - first.new_range().start
+            ),
+            Style::default().fg(app.theme.accent),
+        ));
+        positions.push(None);
+        row_hunks.push(None);
+        previous_end = last.new_range().end;
+        for op in group {
+            let offset = new_offsets[op.new_range().start];
+            let hunk = (op.tag() != DiffTag::Equal)
+                .then(|| {
+                    review.hunks.iter().enumerate().find_map(|(index, h)| {
+                        (!h.resolved && h.range.start == offset).then_some(index)
+                    })
+                })
+                .flatten();
+            if let Some(index) = hunk {
+                let prefix = format!(
+                    "{} Change {} · ",
+                    if index == review.active { ">" } else { " " },
+                    index + 1
+                );
+                let keep_start = display_width(&prefix);
+                let undo_start = keep_start + display_width("Ctrl+Enter Keep · ");
+                buttons.push((
+                    lines.len(),
+                    index,
+                    keep_start,
+                    display_width("Ctrl+Enter Keep"),
+                    true,
+                ));
+                buttons.push((
+                    lines.len(),
+                    index,
+                    undo_start,
+                    display_width("Ctrl+Backspace Undo"),
+                    false,
+                ));
+                lines.push(Line::styled(
+                    format!(
+                        "{} Change {} · Ctrl+Enter Keep · Ctrl+Backspace Undo",
+                        if index == review.active { ">" } else { " " },
+                        index + 1
+                    ),
+                    Style::default().fg(if index == review.active {
+                        app.theme.yellow
+                    } else {
+                        app.theme.muted
+                    }),
+                ));
+                positions.push(None);
+                row_hunks.push(Some(index));
+            }
+            for change in diff.iter_changes(&op) {
+                let raw = change.value();
+                let text = raw.trim_end_matches('\n').trim_end_matches('\r');
+                let tag = change.tag();
+                let color = match tag {
+                    ChangeTag::Delete => app.theme.red,
+                    ChangeTag::Insert => app.theme.green,
+                    ChangeTag::Equal => app.theme.fg,
+                };
+                let background = if tag == ChangeTag::Equal {
+                    app.theme.bg
+                } else {
+                    diff_background(app.theme.bg, color)
+                };
+                let background = if hunk == Some(review.active) {
+                    diff_background(background, app.theme.yellow)
+                } else {
+                    background
+                };
+                let row_style = Style::default().fg(color).bg(background);
+                let paired = if op.tag() == DiffTag::Replace {
+                    if let Some(index) = change.old_index() {
+                        new_lines
+                            .get(op.new_range().start + index - op.old_range().start)
+                            .filter(|_| {
+                                op.new_range().start + index - op.old_range().start
+                                    < op.new_range().end
+                            })
+                    } else if let Some(index) = change.new_index() {
+                        old_lines
+                            .get(op.old_range().start + index - op.new_range().start)
+                            .filter(|_| {
+                                op.old_range().start + index - op.new_range().start
+                                    < op.old_range().end
+                            })
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                };
+                let highlights = paired
+                    .map(|other| {
+                        changed_words(
+                            text,
+                            other.trim_end_matches('\n').trim_end_matches('\r'),
+                            tag == ChangeTag::Insert,
+                        )
+                    })
+                    .unwrap_or_default();
+                let old_number = change
+                    .old_index()
+                    .map(|i| (i + 1).to_string())
+                    .unwrap_or_default();
+                let new_number = change
+                    .new_index()
+                    .map(|i| (i + 1).to_string())
+                    .unwrap_or_default();
+                let sign = match tag {
+                    ChangeTag::Delete => "−",
+                    ChangeTag::Insert => "+",
+                    ChangeTag::Equal => " ",
+                };
+                let mut spans = vec![Span::styled(
+                    format!("{old_number:>digits$} {new_number:>digits$} {sign} "),
+                    if hunk == Some(review.active) {
+                        row_style.fg(app.theme.yellow).add_modifier(Modifier::BOLD)
+                    } else {
+                        row_style
+                    },
+                )];
+                let mut display = 0;
+                let mut segment_start = 0;
+                let mut segment_width = 0;
+                let finish = |lines: &mut Vec<Line<'static>>,
+                              positions: &mut Vec<Option<(usize, usize)>>,
+                              spans: &mut Vec<Span<'static>>,
+                              start: usize,
+                              segment_width: usize| {
+                    spans.push(Span::styled(
+                        " ".repeat(width.saturating_sub(segment_width)),
+                        row_style,
+                    ));
+                    lines.push(Line::from(std::mem::take(spans)));
+                    positions.push(change.new_index().map(|row| (row, start)));
+                };
+                for (byte, g) in text.grapheme_indices(true) {
+                    let w = grapheme_width(g, display);
+                    if segment_width > 0 && segment_width + w > width {
+                        finish(
+                            &mut lines,
+                            &mut positions,
+                            &mut spans,
+                            segment_start,
+                            segment_width,
+                        );
+                        row_hunks.push(hunk);
+                        spans.push(Span::styled(
+                            format!(
+                                "{}{}",
+                                if hunk == Some(review.active) {
+                                    ">"
+                                } else {
+                                    " "
+                                },
+                                " ".repeat(gutter.saturating_sub(1))
+                            ),
+                            if hunk == Some(review.active) {
+                                row_style.fg(app.theme.yellow)
+                            } else {
+                                row_style
+                            },
+                        ));
+                        segment_start = display;
+                        segment_width = 0;
+                    }
+                    let mut style = row_style;
+                    if highlights.iter().any(|r| r.contains(&byte)) {
+                        style = style
+                            .bg(diff_background(background, color))
+                            .add_modifier(Modifier::BOLD);
+                    }
+                    if let Some(index) = change.new_index()
+                        && selection
+                            .as_ref()
+                            .is_some_and(|r| r.contains(&(new_offsets[index] + byte)))
+                    {
+                        style = style.bg(app.theme.selection);
+                    }
+                    spans.push(Span::styled(
+                        if g == "\t" { " ".repeat(w) } else { safe(g) },
+                        style,
+                    ));
+                    display += w;
+                    segment_width += w;
+                }
+                finish(
+                    &mut lines,
+                    &mut positions,
+                    &mut spans,
+                    segment_start,
+                    segment_width,
+                );
+                row_hunks.push(hunk);
+                if !raw.ends_with('\n') && tag != ChangeTag::Equal {
+                    lines.push(Line::styled(
+                        "\\ No newline at end of file",
+                        Style::default().fg(app.theme.muted),
+                    ));
+                    positions.push(None);
+                    row_hunks.push(hunk);
+                }
+            }
+        }
+    }
+    if lines.is_empty() {
+        // All changes manually protected: keep the live document editable.
+        for (row, raw) in new.split('\n').enumerate() {
+            for (segment, text) in wrapped(raw, width).into_iter().enumerate() {
+                lines.push(Line::from(format!("{}{}", " ".repeat(gutter), text)));
+                positions.push(Some((row, segment * width)));
+                row_hunks.push(None);
+            }
+        }
+    } else if new.ends_with('\n') || new.is_empty() {
+        lines.push(Line::from(""));
+        positions.push(Some((new_lines.len(), 0)));
+        row_hunks.push(None);
+    }
+    for (visual, position) in positions.iter().enumerate() {
+        if position.is_some_and(|(row, start)| row == cursor_row && start <= cursor_col) {
+            cursor_visual = Some(visual);
+        }
+    }
+    // Keyboard navigation into collapsed context expands it without changing the document.
+    if app.follow_editor && cursor_visual.is_none() && !review.expanded {
+        app.review.as_mut().unwrap().expanded = true;
+        review_editor(frame, app);
+        return;
+    }
+    let height = usize::from(area.height);
+    if let Some(cursor) = cursor_visual
+        && app.follow_editor
+    {
+        if cursor < app.editor_scroll {
+            app.editor_scroll = cursor;
+        } else if cursor >= app.editor_scroll + height {
+            app.editor_scroll = cursor + 1 - height;
+        }
+    }
+    app.editor_scroll = app.editor_scroll.min(lines.len().saturating_sub(height));
+    let end = (app.editor_scroll + height).min(lines.len());
+    app.review_view_rows = positions[app.editor_scroll..end].to_vec();
+    app.review_row_hunks = row_hunks[app.editor_scroll..end].to_vec();
+    app.review_buttons = buttons
+        .into_iter()
+        .filter_map(|(row, index, start, length, keep)| {
+            if row < app.editor_scroll || row >= end || start >= usize::from(area.width) {
+                return None;
+            }
+            Some((
+                Rect::new(
+                    area.x + start as u16,
+                    area.y + (row - app.editor_scroll) as u16,
+                    length.min(usize::from(area.width) - start) as u16,
+                    1,
+                ),
+                index,
+                keep,
+            ))
+        })
+        .collect();
+    app.editor_view_rows = app
+        .review_view_rows
+        .iter()
+        .map(|p| p.unwrap_or((0, 0)))
+        .collect();
+    frame.render_widget(
+        Paragraph::new(
+            lines
+                .into_iter()
+                .skip(app.editor_scroll)
+                .take(height)
+                .collect::<Vec<_>>(),
+        ),
+        area,
+    );
+    if app.focus == Focus::Editor
+        && app.pending.is_none()
+        && app.live.permission.is_none()
+        && let Some(cursor) = cursor_visual
+        && cursor >= app.editor_scroll
+        && cursor < end
+    {
+        let start = positions[cursor].unwrap().1;
+        frame.set_cursor_position((
+            area.x
+                + (gutter + cursor_col.saturating_sub(start)).min(usize::from(area.width) - 1)
+                    as u16,
+            area.y + (cursor - app.editor_scroll) as u16,
+        ));
+    }
+}
+
+fn chat(frame: &mut Frame, app: &mut App) {
+    let block = pane(
+        match app.agent_mode() {
+            AgentMode::Chat => " Chat ",
+            AgentMode::Agent => " Agent ",
+        },
         app.focus == Focus::Chat,
         app,
     );
@@ -365,25 +774,27 @@ fn chat(frame: &mut Frame, app: &mut App) {
     let composer_width = usize::from(inside.width.saturating_sub(2)).max(1);
     let composer_height = (composer_rows(&app.composer, composer_width).len() as u16 + 2)
         .clamp(3, 6)
-        .min(inside.height);
+        .min(inside.height.saturating_sub(1));
+    let error_lines = if matches!(app.level, Level::Error) {
+        wrapped(
+            &format!("ERROR: {}", safe(&app.status)),
+            usize::from(inside.width).max(1),
+        )
+    } else {
+        vec![]
+    };
+    let error_height = error_lines.len().min(3) as u16;
+    let error_height = error_height.min(inside.height.saturating_sub(composer_height + 2));
     let areas = Layout::vertical([
         Constraint::Min(0),
+        Constraint::Length(error_height),
         Constraint::Length(1),
         Constraint::Length(composer_height),
+        Constraint::Length(1),
     ])
     .split(inside);
     let width = usize::from(areas[0].width).max(1);
-    let mut lines = vec![];
-    for message in &app.messages {
-        lines.push(Line::styled(
-            format!("{}:", message.role),
-            Style::default()
-                .fg(app.theme.accent)
-                .add_modifier(Modifier::BOLD),
-        ));
-        lines.extend(wrapped(&message.text, width).into_iter().map(Line::from));
-        lines.push(Line::from(""));
-    }
+    let lines = chat_lines(app, width);
     let max_scroll = lines.len().saturating_sub(usize::from(areas[0].height));
     if app.follow_chat {
         app.chat_scroll = max_scroll;
@@ -395,6 +806,15 @@ fn chat(frame: &mut Frame, app: &mut App) {
     frame.render_widget(
         Paragraph::new(lines.into_iter().skip(app.chat_scroll).collect::<Vec<_>>()),
         areas[0],
+    );
+    frame.render_widget(
+        Paragraph::new(format!("Model: {}", safe(&app.config.model)))
+            .style(Style::default().fg(app.theme.muted)),
+        areas[4],
+    );
+    frame.render_widget(
+        Paragraph::new(error_lines.join("\n")).style(Style::default().fg(app.theme.red)),
+        areas[1],
     );
     let preview = if let Some(label) = app.selection_label() {
         label
@@ -414,15 +834,15 @@ fn chat(frame: &mut Frame, app: &mut App) {
     };
     frame.render_widget(
         Paragraph::new(preview).style(Style::default().fg(app.theme.muted)),
-        areas[1],
+        areas[2],
     );
     let input = Block::default()
         .borders(Borders::ALL)
         .title(" Prompt ")
         .border_style(Style::default().fg(app.theme.muted));
-    let input_area = input.inner(areas[2]);
+    let input_area = input.inner(areas[3]);
     app.composer_area = input_area;
-    frame.render_widget(input, areas[2]);
+    frame.render_widget(input, areas[3]);
     let rows = composer_rows(&app.composer, usize::from(input_area.width).max(1));
     let cursor_row = rows
         .iter()
@@ -488,6 +908,47 @@ fn chat(frame: &mut Frame, app: &mut App) {
     }
 }
 
+const SPINNER_FRAMES: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+
+fn chat_lines(app: &App, width: usize) -> Vec<Line<'static>> {
+    let mut lines = vec![];
+    for (index, message) in app.messages.iter().enumerate() {
+        let name = match message.role.as_str() {
+            "you" => "You",
+            "assistant" | "mock" => message
+                .agent
+                .as_deref()
+                .unwrap_or(&app.agents[app.agent].name),
+            role => role,
+        };
+        let heading = format!("{}:", safe(name));
+        lines.extend(wrapped(&heading, width).into_iter().map(|line| {
+            Line::styled(
+                line,
+                Style::default()
+                    .fg(app.theme.accent)
+                    .add_modifier(Modifier::BOLD),
+            )
+        }));
+        if app.active_message_index() == Some(index)
+            && let Some(label) = app.activity_label()
+        {
+            let activity = format!(
+                "{} {label}... · Esc cancels",
+                SPINNER_FRAMES[app.animation_frame % SPINNER_FRAMES.len()]
+            );
+            lines.extend(
+                wrapped(&activity, width)
+                    .into_iter()
+                    .map(|line| Line::styled(line, Style::default().fg(app.theme.muted))),
+            );
+        }
+        lines.extend(wrapped(&message.text, width).into_iter().map(Line::from));
+        lines.push(Line::from(""));
+    }
+    lines
+}
+
 fn explorer(frame: &mut Frame, app: &mut App) {
     let block = pane(
         " Files · Enter opens · Esc returns to chat ",
@@ -534,6 +995,74 @@ fn explorer(frame: &mut Frame, app: &mut App) {
     frame.render_widget(Paragraph::new(lines), area);
 }
 
+fn save_prompt(frame: &mut Frame, app: &App) {
+    let Some(prompt) = &app.save_prompt else {
+        return;
+    };
+    let area = frame.area();
+    let w = area.width.min(78);
+    let h = area.height.min(9);
+    let popup = Rect::new(
+        area.x + (area.width - w) / 2,
+        area.y + (area.height - h) / 2,
+        w,
+        h,
+    );
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .title(" Save document ")
+        .style(Style::default().bg(app.theme.bg).fg(app.theme.fg));
+    let inner = block.inner(popup);
+    frame.render_widget(Clear, popup);
+    frame.render_widget(block, popup);
+    let areas = Layout::vertical([
+        Constraint::Length(1),
+        Constraint::Length(3),
+        Constraint::Min(0),
+        Constraint::Length(1),
+    ])
+    .split(inner);
+    frame.render_widget(
+        Paragraph::new("Enter a filename or path (relative to workspace)")
+            .style(Style::default().fg(app.theme.accent)),
+        areas[0],
+    );
+    let input = Block::default()
+        .borders(Borders::ALL)
+        .title(" Filename ")
+        .border_style(Style::default().fg(app.theme.accent));
+    let input_area = input.inner(areas[1]);
+    frame.render_widget(input, areas[1]);
+    let rows = composer_rows(&prompt.input, usize::from(input_area.width).max(1));
+    let row = rows
+        .iter()
+        .rposition(|row| row.start <= prompt.cursor)
+        .unwrap_or(0);
+    frame.render_widget(
+        Paragraph::new(safe(&prompt.input[rows[row].start..rows[row].end])),
+        input_area,
+    );
+    if input_area.width > 0 && input_area.height > 0 {
+        let column = composer_display_width(&prompt.input[rows[row].start..prompt.cursor]);
+        frame.set_cursor_position((
+            input_area.x + column.min(usize::from(input_area.width - 1)) as u16,
+            input_area.y,
+        ));
+    }
+    if let Some(error) = &prompt.error {
+        frame.render_widget(
+            Paragraph::new(safe(error))
+                .wrap(ratatui::widgets::Wrap { trim: false })
+                .style(Style::default().fg(app.theme.red)),
+            areas[2],
+        );
+    }
+    frame.render_widget(
+        Paragraph::new("Enter saves · Esc cancels").style(Style::default().fg(app.theme.muted)),
+        areas[3],
+    );
+}
+
 fn confirmation(frame: &mut Frame, app: &mut App) {
     let area = frame.area();
     let w = area.width.min(68);
@@ -545,8 +1074,8 @@ fn confirmation(frame: &mut Frame, app: &mut App) {
         h,
     );
     let options = [
-        ("S", "Save accepted content and continue"),
-        ("D", "Discard and continue"),
+        ("S", "Save current text and continue"),
+        ("D", "Discard unsaved text; keep already-saved edits"),
         ("C / Esc", "Cancel"),
     ];
     app.popup_choice_area = Rect::new(
@@ -945,6 +1474,71 @@ fn connect(frame: &mut Frame, app: &mut App) {
     }
 }
 
+fn agent_picker(frame: &mut Frame, app: &mut App) {
+    let Some(selected) = app.agent_picker else {
+        return;
+    };
+    let area = frame.area();
+    let w = area.width.min(78);
+    let h = area.height.min((app.agents.len().min(15) + 4) as u16);
+    let popup = Rect::new(
+        area.x + (area.width - w) / 2,
+        area.y + (area.height - h) / 2,
+        w,
+        h,
+    );
+    let visible = usize::from(h.saturating_sub(4));
+    let start = selected.saturating_sub(visible.saturating_sub(1));
+    app.popup_choice_area = Rect::new(
+        popup.x.saturating_add(1),
+        popup.y.saturating_add(2),
+        popup.width.saturating_sub(2),
+        app.agents.len().saturating_sub(start).min(visible) as u16,
+    );
+    app.popup_choice_start = start;
+    let mut lines = vec![Line::styled(
+        "Which agent do you want to use?",
+        Style::default()
+            .fg(app.theme.accent)
+            .add_modifier(Modifier::BOLD),
+    )];
+    lines.extend(
+        app.agents
+            .iter()
+            .enumerate()
+            .skip(start)
+            .take(visible)
+            .map(|(index, agent)| {
+                Line::styled(
+                    format!(
+                        "{} {} · {}",
+                        if index == selected { ">" } else { " " },
+                        safe(&agent.name),
+                        safe(&agent.description)
+                    ),
+                    Style::default().fg(if index == selected {
+                        app.theme.accent
+                    } else {
+                        app.theme.fg
+                    }),
+                )
+            }),
+    );
+    // Keep the controls visible even when the list does not fill the popup.
+    lines.resize(visible + 1, Line::from(""));
+    lines.push(Line::styled(
+        "↑/↓ select · Enter or click choose · Esc close",
+        Style::default().fg(app.theme.muted),
+    ));
+    frame.render_widget(Clear, popup);
+    frame.render_widget(
+        Paragraph::new(lines)
+            .block(Block::default().borders(Borders::ALL).title(" Agents "))
+            .style(Style::default().bg(app.theme.bg).fg(app.theme.fg)),
+        popup,
+    );
+}
+
 fn model_picker(frame: &mut Frame, app: &mut App) {
     let Some(picker) = &app.model_picker else {
         return;
@@ -1090,6 +1684,485 @@ fn wrapped(text: &str, width: usize) -> Vec<String> {
 mod tests {
     use super::*;
     use ratatui::{Terminal, backend::TestBackend};
+
+    fn review_fixture(before: &str, after: &str) -> (tempfile::TempDir, App) {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("review.md");
+        std::fs::write(&path, after).unwrap();
+        let mut app = App::new(None).unwrap();
+        app.document = crate::document::Document::open(&path).unwrap();
+        app.review = Some(crate::review::Review::new(before.into(), after.into()));
+        app.focus = Focus::Editor;
+        (dir, app)
+    }
+
+    fn click(app: &mut App, x: u16, y: u16) {
+        app.mouse(crossterm::event::MouseEvent {
+            kind: crossterm::event::MouseEventKind::Down(crossterm::event::MouseButton::Left),
+            column: x,
+            row: y,
+            modifiers: crossterm::event::KeyModifiers::NONE,
+        });
+    }
+
+    #[test]
+    fn cursor_navigation_highlights_and_shortcuts_resolve_the_cursor_block() {
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        for keep in [true, false] {
+            let before = "old one\ncontext\nold two\nend\n";
+            let after = "new one\ncontext\nnew two\nend\n";
+            let (_dir, mut app) = review_fixture(before, after);
+            let mut terminal = Terminal::new(TestBackend::new(140, 40)).unwrap();
+            terminal.draw(|f| draw(f, &mut app)).unwrap();
+            let first_row = app
+                .review_view_rows
+                .iter()
+                .position(|p| *p == Some((0, 0)))
+                .unwrap();
+            let first_bg = terminal.backend().buffer()[(
+                app.editor_area.x + app.review_gutter as u16 + 4,
+                app.editor_area.y + first_row as u16,
+            )]
+                .bg;
+            app.key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+            app.key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+            assert_eq!(app.review.as_ref().unwrap().active, 1);
+            terminal.draw(|f| draw(f, &mut app)).unwrap();
+            assert_ne!(
+                terminal.backend().buffer()[(
+                    app.editor_area.x + app.review_gutter as u16 + 4,
+                    app.editor_area.y + first_row as u16
+                )]
+                    .bg,
+                first_bg
+            );
+            app.key(KeyEvent::new(
+                if keep {
+                    KeyCode::Enter
+                } else {
+                    KeyCode::Backspace
+                },
+                KeyModifiers::CONTROL,
+            ));
+            let review = app.review.as_ref().unwrap();
+            assert!(!review.hunks[0].resolved);
+            assert!(review.hunks[1].resolved);
+            let expected = if keep {
+                after
+            } else {
+                "new one\ncontext\nold two\nend\n"
+            };
+            assert_eq!(app.document.text, expected);
+            assert_eq!(
+                std::fs::read_to_string(app.document.path.as_ref().unwrap()).unwrap(),
+                expected
+            );
+        }
+    }
+
+    #[test]
+    fn clicking_labels_targets_their_block_not_the_active_block() {
+        for (width, height) in [(140, 40), (80, 30), (30, 10)] {
+            for keep in [true, false] {
+                let (_dir, mut app) =
+                    review_fixture("old\ncontext\nother\n", "new\ncontext\nchanged\n");
+                let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+                app.follow_editor = false;
+                // Bring the second block's controls into view on short terminals.
+                app.editor_scroll = 4;
+                terminal.draw(|f| draw(f, &mut app)).unwrap();
+                let button = app
+                    .review_buttons
+                    .iter()
+                    .find(|(_, i, k)| *i == 1 && *k == keep)
+                    .copied();
+                if width == 30 && !keep {
+                    assert!(
+                        button.is_none(),
+                        "clipped-away Undo must not have a hit target"
+                    );
+                    continue;
+                }
+                let (rect, _, _) = button.unwrap();
+                assert!(rect.right() <= app.editor_area.right());
+                assert_eq!(app.review.as_ref().unwrap().active, 0);
+                click(&mut app, rect.x, rect.y);
+                let review = app.review.as_ref().unwrap();
+                assert!(!review.hunks[0].resolved);
+                assert!(review.hunks[1].resolved);
+                assert!(
+                    app.review_buttons.is_empty(),
+                    "old hit targets are invalidated"
+                );
+                assert_eq!(
+                    app.document.text,
+                    if keep {
+                        "new\ncontext\nchanged\n"
+                    } else {
+                        "new\ncontext\nother\n"
+                    }
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn deleted_rows_and_headers_select_without_moving_the_edit_cursor() {
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        for header in [true, false] {
+            let (_dir, mut app) =
+                review_fixture("old\ncontext\ndeleted\nend\n", "new\ncontext\nend\n");
+            let mut terminal = Terminal::new(TestBackend::new(140, 40)).unwrap();
+            terminal.draw(|f| draw(f, &mut app)).unwrap();
+            let row = if header {
+                let (rect, _, _) = app.review_buttons.iter().find(|(_, i, _)| *i == 1).unwrap();
+                usize::from(rect.y - app.editor_area.y)
+            } else {
+                app.review_row_hunks
+                    .iter()
+                    .enumerate()
+                    .filter(|(r, h)| **h == Some(1) && app.review_view_rows[*r].is_none())
+                    .nth(1)
+                    .unwrap()
+                    .0
+            };
+            let cursor = app.document.cursor;
+            let x = app.editor_area.x;
+            let y = app.editor_area.y + row as u16;
+            click(&mut app, x, y);
+            assert_eq!(app.document.cursor, cursor);
+            assert_eq!(app.review.as_ref().unwrap().active, 1);
+            app.key(KeyEvent::new(KeyCode::Backspace, KeyModifiers::CONTROL));
+            assert_eq!(app.document.text, "new\ncontext\ndeleted\nend\n");
+            assert!(!app.review.as_ref().unwrap().hunks[0].resolved);
+        }
+    }
+
+    #[test]
+    fn wrapped_rows_select_their_change_and_failed_mouse_undo_is_transactional() {
+        let after = format!(
+            "new\n{}changed {}\n",
+            "context\n".repeat(20),
+            "界👩‍💻\t".repeat(40)
+        );
+        let before = format!("old\n{}other\n", "context\n".repeat(20));
+        let (_dir, mut app) = review_fixture(&before, &after);
+        app.review.as_mut().unwrap().expanded = false;
+        app.follow_editor = false;
+        app.editor_scroll = 8;
+        let mut terminal = Terminal::new(TestBackend::new(80, 30)).unwrap();
+        terminal.draw(|f| draw(f, &mut app)).unwrap();
+        let row = app
+            .review_view_rows
+            .iter()
+            .enumerate()
+            .find(|(r, p)| {
+                p.is_some_and(|(_, start)| start > 0) && app.review_row_hunks[*r] == Some(1)
+            })
+            .unwrap()
+            .0;
+        let x = app.editor_area.x + app.review_gutter as u16;
+        let y = app.editor_area.y + row as u16;
+        click(&mut app, x, y);
+        assert_eq!(app.review.as_ref().unwrap().active, 1);
+        assert!(app.document.text.is_char_boundary(app.document.cursor));
+        app.review.as_mut().unwrap().active = 0;
+        let (rect, _, _) = app
+            .review_buttons
+            .iter()
+            .find(|(_, i, keep)| *i == 1 && !keep)
+            .copied()
+            .unwrap();
+        let path = app.document.path.clone().unwrap();
+        std::fs::write(&path, "external change").unwrap();
+        click(&mut app, rect.x, rect.y);
+        assert_eq!(app.document.text, after);
+        assert_eq!(std::fs::read_to_string(path).unwrap(), "external change");
+        assert_eq!(app.review.as_ref().unwrap().pending(), 2);
+        assert!(matches!(app.level, Level::Error));
+    }
+
+    #[test]
+    fn applied_review_renders_unified_lines_word_highlights_and_editable_cursor() {
+        for (width, height) in [(140, 40), (80, 30), (30, 10)] {
+            let mut app = App::new(None).unwrap();
+            let before = "heading\nold words 界\nend\n";
+            let after = "heading\nnew words 界\nend\n";
+            app.document.text = after.into();
+            app.document.move_to("heading\n".len(), false);
+            app.review = Some(crate::review::Review::new(before.into(), after.into()));
+            let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+            terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+            let buffer = terminal.backend().buffer();
+            let editor_rows = (app.editor_area.y..app.editor_area.bottom())
+                .map(|y| {
+                    (app.editor_area.x..app.editor_area.right())
+                        .map(|x| buffer[(x, y)].symbol())
+                        .collect::<String>()
+                })
+                .collect::<Vec<_>>();
+            let screen = editor_rows.join("\n");
+            if height > 10 {
+                assert!(screen.contains("@@ -"));
+                assert!(screen.contains("− old words"));
+                assert!(screen.contains("+ new words"));
+                let row = editor_rows
+                    .iter()
+                    .position(|r| r.contains("+ new words"))
+                    .unwrap();
+                let x = app.editor_area.x + app.review_gutter as u16;
+                let y = app.editor_area.y + row as u16;
+                assert!(buffer[(x, y)].modifier.contains(Modifier::BOLD));
+                assert!(!buffer[(x + 4, y)].modifier.contains(Modifier::BOLD));
+                let deleted = editor_rows
+                    .iter()
+                    .position(|r| r.contains("− old words"))
+                    .unwrap();
+                let cursor = app.document.cursor;
+                app.mouse(crossterm::event::MouseEvent {
+                    kind: crossterm::event::MouseEventKind::Down(
+                        crossterm::event::MouseButton::Left,
+                    ),
+                    column: x,
+                    row: app.editor_area.y + deleted as u16,
+                    modifiers: crossterm::event::KeyModifiers::NONE,
+                });
+                assert_eq!(app.document.cursor, cursor);
+                app.mouse(crossterm::event::MouseEvent {
+                    kind: crossterm::event::MouseEventKind::Down(
+                        crossterm::event::MouseButton::Left,
+                    ),
+                    column: x + 2,
+                    row: y,
+                    modifiers: crossterm::event::KeyModifiers::NONE,
+                });
+                assert_eq!(app.document.cursor, "heading\n".len() + 2);
+            }
+            let cursor = terminal.get_cursor_position().unwrap();
+            assert!(cursor.x < width && cursor.y < height);
+        }
+    }
+
+    #[test]
+    fn applied_review_wraps_unicode_and_expands_collapsed_context_for_navigation() {
+        let mut app = App::new(None).unwrap();
+        let before = format!("{}old\n{}", "context\n".repeat(20), "context\n".repeat(20));
+        let after = before.replace("old", &"界👩‍💻\t".repeat(40));
+        app.document.text = after.clone();
+        app.review = Some(crate::review::Review::new(before, after.clone()));
+        app.document.move_to("context\n".repeat(20).len(), false);
+        app.command("/changes collapse").unwrap();
+        let mut terminal = Terminal::new(TestBackend::new(80, 30)).unwrap();
+        terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+        assert!(!app.review.as_ref().unwrap().expanded);
+        assert_eq!(app.document.text, after);
+        app.document.move_to(0, false);
+        app.follow_editor = true;
+        terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+        assert!(app.review.as_ref().unwrap().expanded);
+        assert!(
+            app.review_view_rows
+                .iter()
+                .any(|p| matches!(p, Some((0, 0))))
+        );
+    }
+    #[test]
+    fn messages_keep_agent_names_and_legacy_roles_render_readably() {
+        let mut app = App::new(None).unwrap();
+        app.messages.clear();
+        app.agent = 0;
+        app.message("you", "Hello");
+        app.message("assistant", "Plan");
+        app.agent = 1;
+        app.message("mock", "Offline response");
+        let lines = chat_lines(&app, 80)
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>();
+        assert_eq!(lines[0], "You:");
+        assert_eq!(lines[3], "Planner:");
+        assert_eq!(lines[6], "Blogger:");
+        let restored: crate::app::Message =
+            serde_json::from_str(r#"{"role":"assistant","text":"Old response"}"#).unwrap();
+        assert!(restored.agent.is_none());
+        app.messages.push(restored);
+        assert_eq!(chat_lines(&app, 80)[9].to_string(), "Blogger:");
+        let restored: crate::app::Message =
+            serde_json::from_str(&serde_json::to_string(&app.messages[1]).unwrap()).unwrap();
+        assert_eq!(restored.agent.as_deref(), Some("Planner"));
+    }
+
+    #[test]
+    fn current_model_is_below_prompt_not_in_global_status() {
+        for (width, height) in [(140, 40), (80, 30), (30, 10)] {
+            let mut app = App::new(None).unwrap();
+            app.config.model = "ollama::test".into();
+            let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+            terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+            let buffer = terminal.backend().buffer();
+            let row = |y, start, end| {
+                (start..end)
+                    .map(|x| buffer[(x, y)].symbol())
+                    .collect::<String>()
+            };
+            assert!(
+                row(
+                    app.chat_area.bottom() - 2,
+                    app.chat_area.x + 1,
+                    app.chat_area.right() - 1
+                )
+                .contains("Model: ollama::test")
+            );
+            if app.composer_area.height > 0 {
+                assert!(app.composer_area.bottom() <= app.chat_area.bottom() - 3);
+            }
+            let status = row(height - 2, 0, width);
+            assert!(!status.contains("ollama::test"));
+            assert!(!status.contains(&app.config.theme));
+        }
+    }
+
+    #[test]
+    fn agent_picker_renders_scrolled_choices_and_mouse_selects_visible_agent() {
+        for (width, height) in [(140, 40), (80, 30), (30, 10)] {
+            let mut app = App::new(None).unwrap();
+            for index in 0..20 {
+                app.agents.push(crate::app::Agent {
+                    name: format!("Custom {index}"),
+                    description: "Description".into(),
+                    instructions: String::new(),
+                });
+            }
+            let selected = app.agents.len() - 1;
+            app.agent_picker = Some(selected);
+            let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+            terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+            let buffer = terminal.backend().buffer();
+            let screen = buffer
+                .content()
+                .iter()
+                .map(|cell| cell.symbol())
+                .collect::<String>();
+            assert!(screen.contains("Agents"));
+            assert!(screen.contains("> Custom 19"));
+            assert!(app.popup_choice_start > 0);
+            assert!(app.popup_choice_area.bottom() <= height);
+            let expected = app.popup_choice_start;
+            app.mouse(crossterm::event::MouseEvent {
+                kind: crossterm::event::MouseEventKind::Down(crossterm::event::MouseButton::Left),
+                column: app.popup_choice_area.x,
+                row: app.popup_choice_area.y,
+                modifiers: crossterm::event::KeyModifiers::NONE,
+            });
+            assert_eq!(app.agent, expected);
+            assert!(app.agent_picker.is_none());
+        }
+    }
+
+    #[test]
+    fn headers_show_filename_once_and_only_assistant_mode() {
+        for (width, height) in [(140, 40), (80, 30), (30, 10)] {
+            for (mode, title) in [(AgentMode::Chat, "Chat"), (AgentMode::Agent, "Agent")] {
+                let mut app = App::new(None).unwrap();
+                app.document.path = Some("draft.md".into());
+                app.document.insert("unsaved");
+                app.config
+                    .agent_modes
+                    .insert(app.agents[app.agent].name.clone(), mode);
+                let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+                terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+                let buffer = terminal.backend().buffer();
+                let row = |y, start, end| {
+                    (start..end)
+                        .map(|x| buffer[(x, y)].symbol())
+                        .collect::<String>()
+                };
+                assert!(row(0, 0, width).contains("draft.md *"));
+                let header = row(app.chat_area.y, app.chat_area.x, app.chat_area.right());
+                assert_eq!(header.trim_matches(['─', '┐', '┌', ' ']), title);
+                assert!(!row(height - 2, 0, width).contains("draft.md"));
+            }
+        }
+    }
+
+    #[test]
+    fn command_errors_render_above_prompt_hints() {
+        for (width, height) in [(140, 40), (80, 30)] {
+            let mut app = App::new(None).unwrap();
+            app.focus = Focus::Chat;
+            app.compose_insert("/theme unknown");
+            app.key(crossterm::event::KeyEvent::new(
+                crossterm::event::KeyCode::Enter,
+                crossterm::event::KeyModifiers::NONE,
+            ));
+            let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+            terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+            let buffer = terminal.backend().buffer();
+            let hint_y = app.composer_area.y - 2;
+            let error_y = hint_y
+                - wrapped(
+                    &format!("ERROR: {}", app.status),
+                    usize::from(app.chat_area.width - 2),
+                )
+                .len() as u16;
+            let row = |y| {
+                (app.chat_area.x + 1..app.chat_area.right() - 1)
+                    .map(|x| buffer[(x, y)].symbol())
+                    .collect::<String>()
+            };
+            assert!(row(error_y).contains("ERROR: Unknown theme"));
+            assert!(row(hint_y).contains("Enter submits"));
+            assert_eq!(buffer[(app.chat_area.x + 1, error_y)].fg, app.theme.red);
+            assert_eq!(app.composer.trim(), "/theme unknown");
+
+            app.notify(Level::Success, "Saved");
+            terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+            let buffer = terminal.backend().buffer();
+            let chat = (app.chat_area.y..app.chat_area.bottom())
+                .flat_map(|y| {
+                    (app.chat_area.x..app.chat_area.right()).map(move |x| buffer[(x, y)].symbol())
+                })
+                .collect::<String>();
+            assert!(!chat.contains("ERROR:"));
+        }
+    }
+
+    #[test]
+    fn filename_popup_renders_input_cursor_and_errors_at_supported_sizes() {
+        for (width, height) in [(140, 40), (80, 30), (30, 10)] {
+            let mut app = App::new(None).unwrap();
+            app.command("/save").unwrap();
+            app.paste(&"界👩‍💻".repeat(100));
+            app.save_prompt.as_mut().unwrap().error = Some("Choose another filename".into());
+            let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+            terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+            let screen = terminal
+                .backend()
+                .buffer()
+                .content()
+                .iter()
+                .map(|cell| cell.symbol())
+                .collect::<String>();
+            assert!(screen.contains("Save document"));
+            assert!(screen.contains("Filename"));
+            assert!(screen.contains("Choose another filename"));
+            let cursor = terminal.get_cursor_position().unwrap();
+            assert!(cursor.x < width && cursor.y < height);
+        }
+    }
+
+    #[test]
+    fn long_errors_wrap_safely_at_all_supported_sizes() {
+        for (width, height) in [(140, 40), (80, 30), (30, 10)] {
+            let mut app = App::new(None).unwrap();
+            app.focus = Focus::Chat;
+            app.notify(Level::Error, "Cannot open 界👩‍💻 document. ".repeat(20));
+            let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+            terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+            assert!(app.composer_area.bottom() <= app.chat_area.bottom());
+        }
+    }
+
     #[test]
     fn renders_wide_and_narrow_layouts() {
         for (width, height) in [(140, 40), (124, 30), (80, 30), (30, 10), (10, 5)] {

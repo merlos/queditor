@@ -5,6 +5,7 @@ pub mod credentials;
 pub mod document;
 pub mod live;
 pub mod provider;
+pub mod review;
 pub mod storage;
 pub mod tools;
 pub mod ui;

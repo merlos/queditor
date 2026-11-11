@@ -6,7 +6,8 @@
 - Application/configuration name: `queditor`; older `agenditor` names are draft typos.
 - Default theme: Catppuccin-inspired Mocha; contrasting daylight theme.
 - Preserve Markdown syntax in the editor; this is not a rich-text preview.
-- Agent output is a proposal, never permission to mutate or save a document.
+- VS Code-style live Agent workflow: validated structured edits apply and save before
+  editable inline Keep/Undo review. Chat is read-only; mock previews remain unsaved.
 - Keep mock mode as default; use `genai` for many providers behind one async boundary.
 - OpenCode is an interaction reference, not a bundled dependency or a promise of parity.
 
@@ -26,22 +27,30 @@ on Tokio, communicating through bounded channels with `live` orchestration.
 resolves environment, OS-keyring, and private-file references without exposing keys.
 `tools` prepares anchored filesystem capabilities before permission waits, without
 reading text. `storage` handles private recovery/session/grant records outside the
-renderer. Never call providers inside rendering or synchronous key handling.
+renderer. `review` owns current edit ranges and manual-edit rebasing/protection;
+`Document::replace_and_save` commits editor changes only after a successful save.
+Never call providers inside rendering or synchronous key handling.
 
 ### Invariants
 
 1. Editing offsets are UTF-8 grapheme boundaries.
 2. Dirty state compares content to the saved baseline, not just a boolean toggle.
 3. Attachments capture exact text and document revision.
-4. Agent-mode proposals hold a complete document snapshot plus line-based diff blocks.
-5. Whole or partial acceptance validates revision/original and creates one undoable edit.
-6. Save operates only on accepted text and checks external disk changes.
+4. Agent requests hold complete document snapshots; completed structured edits must
+   match revision/original before application.
+5. Live application is one undoable, transactional auto-save. Keep clears review state;
+   review Undo saves a targeted reversal and preserves later manual edits.
+6. Saves check external disk changes. Live saves include all current text; offline
+   mock previews remain excluded. Unnamed documents use private temporary backing until
+   explicit Save As switches subsequent auto-saves to the user's file.
 7. Dirty open/quit operations require explicit confirmation.
 8. Mock mode makes no network calls; Chat mode sends explicit context, while Agent
    mode deliberately sends the open document snapshot plus approved tool results.
 9. File permissions are local/exact-path and cannot be overridden by agent prompts.
-10. Partial/cancelled/failed turns never stage generated edits or commit model-facing history.
+10. Partial/cancelled/failed turns never apply generated edits or commit model-facing history.
 11. Recovery never writes the original document; session-content persistence is opt-in.
+    Enabled recovery requires durable pre-edit checkpoints before auto-save, retained
+    across Keep/exit. Pending live edits are already visible to external applications.
 
 ## Milestones
 
@@ -80,10 +89,12 @@ have now been added. Argument completion and broader chat-interaction parity rem
 
 ### 5. Safe edit review — local workflow implemented
 
-Deterministic proposals, colored diff blocks, per-block inclusion, whole-proposal
-accept/reject, atomic undo, stale revision rejection, and save exclusion are
-implemented through a non-modal editor overlay. Live generation and review allow
-ordinary editing; manual edits take precedence and stale proposals are discarded.
+Offline deterministic proposals retain explicit acceptance and save exclusion.
+Live edits now use an editable unified inline diff with red removals, green additions,
+old/new line numbers, word highlights, context expansion/collapse, and Keep/Undo
+navigation. Application and reversal save transactionally; manual changes outside
+pending hunks rebase them, while overlapping edits are protected from review Undo.
+Generation still rejects stale snapshots. Review does not delay saving or require Git.
 
 ### 6. Live AI and permissions — core implementation delivered
 
@@ -96,7 +107,9 @@ ordinary editing; manual edits take precedence and stale proposals are discarded
 7. Introduce read/list tools with canonical paths, symlink checks, size/text limits,
    sensitive-file exclusions and scoped permission prompts.
 8. Add allow-once/session/persistent/deny plus saved-grant review and revocation.
-9. Do not grant shell execution, deletion, or direct disk writes in the initial AI MVP.
+9. Do not grant shell execution, deletion, or arbitrary write tools. Queditor alone
+   applies/saves a validated complete-document edit to the open file or private
+   temporary backing for an unnamed document.
 10. Add guided provider connection, endpoint-bound credentials, model discovery and
     selection, compaction, cancellation and sanitized provider failures.
 
@@ -108,7 +121,9 @@ without credentials. Remaining: more provider-account testing, usage reporting,
 automatic reconnect semantics and granular grant revocation.
 
 Gate: mock/provider tests prove agents cannot read unapproved files, silently send
-unattached document text, overwrite newer user edits, or write unaccepted proposals.
+unattached document text, overwrite newer user/disk edits, or auto-save incomplete
+results. Review Undo must preserve later manual edits and pre-edit checkpoints must
+survive clean exit when recovery is enabled.
 
 An optional OpenCode V2 HTTP adapter requires a separate authenticated discovery
 and compatibility spike. Its experimental API surface must not be assumed stable,

@@ -17,6 +17,7 @@ library. Never imply mock responses are live AI or every provider is account-tes
 - `src/provider.rs`: validated provider endpoints, model discovery, exact genai targets.
 - `src/credentials.rs`: environment/keyring/private-file secret resolution and storage.
 - `src/live.rs`: async job lifecycle, snapshot validation, permission/state orchestration.
+- `src/review.rs`: already-applied edit ranges, manual-edit rebasing, protected Keep/Undo state.
 - `src/tools.rs`: exact-path grants, sensitive exclusions, anchored file capabilities.
 - `src/storage.rs`: private versioned recovery/session/permission records.
 - `src/ui.rs`: rendering and layout; do not perform filesystem/network I/O here.
@@ -32,10 +33,18 @@ they acquire real complexity; do not create empty placeholder hierarchies.
 - Rust 2024, stable toolchain, `cargo fmt`, typed state, explicit errors.
 - Cursor/selection offsets are UTF-8 bytes at grapheme boundaries.
 - Display columns differ from byte/grapheme offsets; account for tabs and wide glyphs.
-- Never mutate a document merely because an assistant returned text.
-- Validate base revision and original content before accepting a proposal.
-- Acceptance is one undoable edit and never an implicit save.
-- Saving excludes pending proposals and checks the disk baseline.
+- Ordinary assistant text never mutates documents. A structured live Agent edit applies
+  and saves automatically only after successful completion and snapshot validation.
+- Validate base revision and original content before automatic application. Unnamed
+  documents auto-save to private temporary backing files without acquiring a user
+  filename; explicit Save As migrates to the real file for subsequent auto-saves.
+- Automatic apply/save is transactional, one undoable edit, with disk-baseline checks.
+  Failure must leave the editor and destination unchanged.
+- Live pending edits are already on disk. Keep clears review state; review Undo saves
+  a targeted reversal, checks original replacement content, and preserves manual edits.
+- Rebase untouched review ranges after manual edits; protect overlapping edits from
+  review Undo. Ordinary editor undo/redo remains unsaved until an explicit save.
+- Offline /demo and /rewrite remain unsaved mock previews; saving excludes them.
 - Do not overwrite external changes or discard dirty content without confirmation.
 - Network/provider integration must go behind a backend boundary and never block rendering.
 - Agent tools must enforce permissions locally, not through prompt instructions.
@@ -43,11 +52,13 @@ they acquire real complexity; do not create empty placeholder hierarchies.
 - Chat mode is read-only. Agent mode may target the complete open document snapshot;
   current selections and pinned snapshots are important context, not edit boundaries.
 - Cancellation must discard generated proposals and prevent late events mutating a new session/document.
-- Live proposal acceptance uses dedicated modified shortcuts; ordinary typing and
-  Enter must never accept an unseen change.
+- Keep/Undo uses dedicated modified shortcuts. Typing edits the live document;
+  deleted diff rows and headers are never editable document positions.
 - Compaction must reject tool calls, even if a provider returns them without declared tools.
 - Session-content persistence is opt-in; never persist temporary grants or credentials.
 - Recovery writes local state, not the original document; restoration is explicit.
+  With recovery enabled, durable independent pre-edit checkpoints must succeed before
+  auto-save and survive Keep/normal exit. Never persist credentials or temporary grants.
 - Never log document contents, prompts, credentials, or authorization headers by default.
 - Configuration examples must not contain secrets.
 - Do not edit users' home-directory configuration as part of repository development.

@@ -53,6 +53,16 @@ impl Store {
     pub fn recovery_id(&self) -> &str {
         &self.instance
     }
+    /// Independent pre-agent checkpoint, retained across normal exit and Keep.
+    pub fn agent_checkpoint(&self, id: &str, document: Recovery) -> Result<()> {
+        write_json(
+            &self.path("recovery", id)?,
+            &RecoveryFile {
+                schema_version: 1,
+                document,
+            },
+        )
+    }
     pub fn checkpoint(
         &self,
         recovery: Option<Recovery>,
@@ -259,6 +269,7 @@ mod tests {
             messages: vec![Message {
                 role: "you".into(),
                 text: "prompt".into(),
+                agent: None,
             }],
             history: vec![ChatMessage::user("prompt")],
             model: "mock".into(),

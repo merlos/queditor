@@ -23,6 +23,12 @@ unsupported schema versions warn and fall back to safe defaults. A bad binding
 profile falls back to vscode. Model, agent, and each agent's Chat/Agent mode are
 saved immediately and restored on the next launch; a removed custom agent falls
 back to Planner. Agents without a saved mode default to read-only Chat mode.
+Live Agent mode automatically applies and saves completed edits before Keep/Undo
+review, including existing unsaved text. There is no approval-before-save option.
+Unnamed documents use private temporary backing until Ctrl+S/Save As chooses a real
+file; subsequent agent edits save that file. `recovery: true` also
+requires a durable pre-edit snapshot before auto-save and retains it after Keep/exit;
+`recovery: false` explicitly disables that safeguard, not automatic saving.
 `/theme daylight` changes the theme for the current run only.
 
 ## Providers and credentials

@@ -1,11 +1,18 @@
 ---
 title: Documentation
-description: Install Queditor and learn its explicit-review editing workflow.
+description: Install Queditor and learn its inline Keep/Undo editing workflow.
 ---
 
 Queditor is a terminal Markdown and text editor with an integrated assistant.
-Assistant changes are always staged as proposals: inspect the diff, accept or
-reject it, and save only when you choose.
+Live Agent edits apply and save automatically, then appear in an editable unified
+diff. Keep confirms them; Undo reverts and saves them. Chat mode is read-only, and
+offline mock demonstrations remain unsaved previews.
+
+:::caution[Pending edits are already on disk]
+Review before publishing or synchronizing. Automatic saves include existing unsaved
+text; Undo cannot reverse external effects. Unnamed documents use private temporary
+backing; Ctrl+S chooses a real filename for subsequent automatic saves.
+:::
 
 :::caution[Early prototype]
 Offline mock mode is the default. Live AI requires provider configuration, and
@@ -14,7 +21,7 @@ the downloadable binaries are currently unsigned.
 
 ## Start here
 
-- Follow the [user guide](./user-guide/) for editing, files, chat, and proposal review.
+- Follow the [user guide](./user-guide/) for editing, files, chat, and Keep/Undo review.
 - Read [configuration](./configuration/) to choose a theme, keybindings, and models.
 - Review [live AI and privacy](./live-ai/) before connecting a provider.
 

@@ -22,10 +22,21 @@ masked API-key field.
 
 At widths >=124 columns, panels have at least 80 and 40 usable columns. Below
 that, the editor sits above chat. Terminals smaller than 30×10 show a resize message.
+The filename and unsaved-change marker appear only in the editor header. The
+assistant header shows just Chat or Agent. Messages are labeled `You:` or with the
+responding agent's name (for example, `Planner:`); changing agents does not rename
+earlier responses. Running activity and a full-cycle spinner appear directly below
+the responding agent's name, together with the Escape cancellation hint. The current
+model appears below the prompt. The bottom bar shows cursor position, focus, and
+selected agent, without the model or theme name.
 
 ## Files
 
 - Ctrl+S or `/save` saves the current document.
+- For an unnamed document, Ctrl+S, `/save`, or `/sa` then Enter opens a filename
+  popup. Type or paste a path (spaces need no quotes here); Enter saves and Escape
+  cancels. Relative paths use the chat workspace. Save errors stay in the popup
+  so you can correct the filename.
 - `/save "new name.md"` saves to an unused path; existing unrelated files are not overwritten.
 - `/open "file.md"` opens text, or creates an empty document at a missing filename.
 - `/files [directory]` opens the explorer in the chat pane.
@@ -37,7 +48,8 @@ Paths containing spaces need quotes. Relative command paths use the chat workspa
 `~/` expands to your home directory. Missing parent directories are not created.
 
 Opening another file or exiting with dirty content displays a save/discard/cancel
-confirmation. For an unnamed file, choose save, then enter `/save <path>` and retry.
+confirmation. For an unnamed file, choosing save opens the filename popup; saving
+successfully continues the original operation. Escape returns to the confirmation.
 Popup questions and answers use distinct colors, with one answer per line. Use
 Up/Down and Enter, click an answer, or press its displayed shortcut. Escape cancels
 where shown. This interaction is consistent across confirmations, permissions,
@@ -59,17 +71,30 @@ Use `""` as the replacement to delete occurrences.
 ## Chat and context
 
 Enter submits. Ctrl+J inserts a newline; Shift+Enter works in terminals that
-distinguish it. Typing `/` shows suggestions: arrows select, Tab completes.
+distinguish it. Typing `/` shows suggestions: arrows select, Enter completes and
+runs the highlighted command, and Tab completes without submitting so you can add
+arguments. For example, `/co` then Enter opens `/connect` immediately.
+Slash commands are not echoed as `You:` messages in either mode; command output
+and errors remain visible, and successful commands can still be recalled with Up.
+Command errors appear in red directly above the prompt hints; failed input stays
+in the prompt for correction. Long errors wrap across up to three lines.
 Long prompt lines wrap within the composer. Up on the prompt's first visual line
 recalls older submitted prompts; Down on its last visual line moves toward newer
 prompts and eventually restores the unsent draft. Within a multiline or wrapped
 prompt, Up and Down move between visual lines instead.
+Ctrl+A and Ctrl+E move to the start and end of the current logical prompt line.
+Ctrl+K deletes from the cursor to that line's end, preserving its newline and the
+following lines. These shortcuts work in both editing profiles and in the editor;
+soft wrapping does not change which logical line they operate on.
 Escape clears unsent input. PageUp/PageDown or the wheel scroll chat. Scrolling
 away from the bottom stops auto-follow until you return to the bottom.
 Shift+Tab cycles agents while chat is focused. Ctrl+G toggles the selected agent
 between read-only Chat mode and editing Agent mode; `/mode chat` and `/mode agent`
 select explicitly. Each agent's mode, the selected agent, and the model are saved
 to `config.yaml` and restored on the next launch.
+`/agents` then Enter opens an agent picker with names and descriptions. Use Up/Down
+and Enter, or click a row, to select and remember an agent. Escape closes without
+changing the agent. `/agents <name>` selects directly without opening the popup.
 
 Select editor text and switch to chat. `Selected line X` or `Selected lines X:Y`
 appears above the prompt, and the current selection is automatically snapshotted and sent as important
@@ -86,13 +111,13 @@ selection or pinned attachment and committed history to the selected provider.
 history while retaining the visible transcript. `/cancel` stops an active request.
 Optional persistence and recovery are described in [live AI](live-ai.md).
 
-## Review demonstration
+## Offline review demonstration
 
 `/demo` proposes uppercase text for attached context, current selection, or the
 whole document, in that priority order. `/rewrite "replacement"` proposes the
 supplied text. These are deterministic local demonstrations, not model output.
 
-The editor remains usable while agent changes are pending. It previews the proposed
+The editor remains usable while mock changes are pending. It previews the proposed
 document directly in the editor, with proposed replacement text highlighted. The
 bottom review line keeps the acceptance controls visible. Alt+] and Alt+[ move
 between changes, Ctrl+Enter keeps the active change, and Ctrl+Backspace rejects it.
@@ -110,21 +135,57 @@ discards the proposal. Cancel the confirmation to return to review.
 
 ## Live edits and file permissions
 
-Chat mode has no edit tool: it answers questions, critiques text, and can describe
-suggested changes without staging them. Agent mode sends a snapshot of the complete
-open document and may propose a complete revised document based on the prompt. A
-selection is highlighted as important context but does not restrict the editable
-range. The result is never applied or saved automatically.
+Chat mode has no edit tool and never changes files. Agent mode sends a snapshot of
+the complete open document; selections are important context, not edit boundaries.
+**Live Agent edits apply and save automatically before review**, after successful
+completion and revision/original-content validation. Unnamed documents automatically
+use a private temporary backing file while staying “[Untitled]”. Ctrl+S still asks
+for a real filename; after Save As, Agent edits and review Undo continue on that file.
+Temporary backing is cleaned up on close; enabled recovery retains pre-edit snapshots
+and unsaved untitled text checkpoints for explicit restoration after interruptions.
+The automatic save includes the whole file, including existing unsaved text. Editing
+during generation is allowed, but makes an older generated result stale and unapplied.
+External disk changes and failed saves leave the editor unchanged.
 
-Live results enter the same non-modal change review automatically. Dedicated modified
-shortcuts prevent queued ordinary typing from accepting unseen edits. Changes kept
-individually are validated and applied together as one undoable edit when review is
-complete. You may edit during generation or review; stale results are rejected and
-manual edits take precedence.
+The editable unified diff shows old/new line numbers, red `−` removals, green `+`
+additions, and stronger word-level highlights. Deleted lines and diff headers are
+review-only; clicking live added/context lines positions the normal editing cursor.
+Moving the cursor into a pending change selects and highlights that block. Clicking
+a removed line or a block's change header also selects it without moving the text
+cursor. Click its `Ctrl+Enter Keep` or `Ctrl+Backspace Undo` label to act directly
+on that block; no modifier key is needed. Moving into unchanged context retains
+the last selected block, and the keyboard shortcuts act on the highlighted block.
+Long lines wrap with aligned continuation rows. Full context is shown by default;
+`/changes collapse` shows three context lines per diff group, and `/changes expand`
+restores the full document. Keyboard navigation into hidden context expands it.
+
+- Alt+[ / Alt+] selects a change.
+- Ctrl+Enter or `/changes keep` confirms it; nothing is applied or saved by Keep.
+- Ctrl+Backspace or `/changes undo` reverts it and saves the reversal immediately.
+- `/changes keep-all` and `/changes undo-all` resolve all remaining changes.
+- `reject` and `reject-all` remain aliases for Undo, for compatibility.
+
+The next pending change is selected after a decision. Kept/undone changes lose
+their diff highlights. Typing edits the current live document but is not auto-saved;
+Ctrl+S saves it normally. Keep does not save later manual edits. Review Undo also
+saves any remaining manual text as part of saving the whole file. Edits outside an
+agent change shift its review positions; edits that touch it protect that change
+from review Undo, so your work is never blindly replaced. Ordinary Ctrl+Z undo/redo
+remains an unsaved editor operation, separate from review Undo.
+
+With recovery enabled, a private pre-edit checkpoint is written before automatic
+saving and survives Keep and normal exit. `/recover` can restore it into the editor
+for inspection; saving remains explicit. Recovery storage failure prevents auto-apply
+unless you explicitly disable recovery. No review state is restored across restarts.
+
+Pending live edits are already on disk: previewers and synchronization tools can see
+them before Keep. Review before publishing; Undo cannot reverse external effects.
+Quitting/opening during review does not revert saved edits. “Discard” discards only
+unsaved text; use review Undo first if you want to reverse saved agent edits.
 
 Escape cancels active agent work from either pane, including thinking, streaming,
-tool work, provider waits, and permission waits. The chat title animates and reports
-the active state while work is in progress.
+tool work, provider waits, and permission waits. Activity and a spinner appear below
+the responding agent's name. Escape does not revert edits already applied and saved.
 
 `read_file` and `list_directory` show a permission dialog with the canonical path
 and operation. O allows once, S for the session, A persistently for that exact
