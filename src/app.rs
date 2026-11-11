@@ -121,6 +121,63 @@ pub struct Agent {
     pub instructions: String,
 }
 
+const DEFAULT_AGENT_SOURCES: &[(&str, &str)] =
+    include!(concat!(env!("OUT_DIR"), "/default_agents.rs"));
+
+impl Agent {
+    fn defaults() -> Result<Vec<Self>> {
+        Self::parse_defaults(DEFAULT_AGENT_SOURCES)
+    }
+
+    fn parse_markdown(source: &str) -> Result<Self> {
+        #[derive(Deserialize)]
+        struct Metadata {
+            name: String,
+            #[serde(default)]
+            description: String,
+        }
+        let content = source.replace("\r\n", "\n");
+        let rest = content
+            .strip_prefix("---\n")
+            .context("Missing YAML frontmatter")?;
+        let (header, body) = rest
+            .split_once("\n---\n")
+            .context("Missing frontmatter closing marker")?;
+        let metadata: Metadata = serde_yaml_ng::from_str(header)?;
+        Ok(Self {
+            name: metadata.name,
+            description: metadata.description,
+            instructions: body.trim().into(),
+        })
+    }
+
+    fn parse_defaults(sources: &[(&str, &str)]) -> Result<Vec<Self>> {
+        if sources.is_empty() {
+            bail!("At least one default agent is required");
+        }
+        let mut agents: Vec<Self> = Vec::new();
+        for &(filename, source) in sources {
+            let agent = Self::parse_markdown(source)
+                .with_context(|| format!("Invalid embedded assets/agents/{filename}"))?;
+            if agent.name.trim().is_empty()
+                || agent.name.len() > 200
+                || agent.name.chars().any(char::is_control)
+                || agent.instructions.trim().is_empty()
+            {
+                bail!("Default agents require a valid name and nonempty instructions");
+            }
+            if agents
+                .iter()
+                .any(|other| other.name.eq_ignore_ascii_case(&agent.name))
+            {
+                bail!("Default agent names must be unique");
+            }
+            agents.push(agent);
+        }
+        Ok(agents)
+    }
+}
+
 pub struct SavePrompt {
     pub input: String,
     pub cursor: usize,
@@ -298,21 +355,7 @@ impl App {
             completion: 0,
             chat_scroll: 0,
             follow_chat: true,
-            agents: vec![
-                Agent {
-                    name: "Planner".into(),
-                    description: "Specifications and plans".into(),
-                    instructions: "Clarify intent, assumptions, risks, and acceptance criteria."
-                        .into(),
-                },
-                Agent {
-                    name: "Blogger".into(),
-                    description: "Blog drafts and revisions".into(),
-                    instructions:
-                        "Preserve voice, audience, and meaning. Flag claims needing verification."
-                            .into(),
-                },
-            ],
+            agents: Agent::defaults()?,
             agent: 0,
             attachment: None,
             proposal: None,
@@ -365,7 +408,10 @@ impl App {
             app.agent = index;
         } else {
             app.config.agent = app.agents[0].name.clone();
-            app.notify(Level::Warning, "Saved agent is unavailable; using Planner");
+            app.notify(
+                Level::Warning,
+                format!("Saved agent is unavailable; using {}", app.config.agent),
+            );
         }
         if let Some(w) = warning.or(binding_warning) {
             app.notify(Level::Warning, w);
@@ -2380,12 +2426,6 @@ impl App {
     }
 
     fn load_agents(&mut self) -> Result<()> {
-        #[derive(Deserialize)]
-        struct Metadata {
-            name: String,
-            #[serde(default)]
-            description: String,
-        }
         let dir = config_dir().join("agents");
         if !dir.exists() {
             return Ok(());
@@ -2401,27 +2441,16 @@ impl App {
             .filter(|p| p.extension().is_some_and(|e| e == "md"))
         {
             let parsed = (|| -> Result<Agent> {
-                let content = fs::read_to_string(&path)?.replace("\r\n", "\n");
-                let rest = content
-                    .strip_prefix("---\n")
-                    .context("Missing YAML frontmatter")?;
-                let (header, body) = rest
-                    .split_once("\n---\n")
-                    .context("Missing frontmatter closing marker")?;
-                let m: Metadata = serde_yaml_ng::from_str(header)?;
-                if m.name.trim().is_empty()
+                let agent = Agent::parse_markdown(&fs::read_to_string(&path)?)?;
+                if agent.name.trim().is_empty()
                     || self
                         .agents
                         .iter()
-                        .any(|a| a.name.eq_ignore_ascii_case(&m.name))
+                        .any(|a| a.name.eq_ignore_ascii_case(&agent.name))
                 {
                     bail!("Empty or duplicate agent name");
                 }
-                Ok(Agent {
-                    name: m.name,
-                    description: m.description,
-                    instructions: body.trim().into(),
-                })
+                Ok(agent)
             })();
             match parsed {
                 Ok(a) => self.agents.push(a),
@@ -2644,6 +2673,107 @@ fn key_name(key: KeyEvent) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn embedded_default_agents_preserve_order_descriptions_and_prompts() {
+        let agents = Agent::defaults().unwrap();
+        assert!(agents.len() >= 2);
+        assert_eq!(agents[0].name, "Planner");
+        assert_eq!(agents[0].description, "Specifications and plans");
+        assert_eq!(
+            agents[0].instructions,
+            "Clarify intent, assumptions, risks, and acceptance criteria."
+        );
+        assert_eq!(agents[1].name, "Blogger");
+        assert_eq!(agents[1].description, "Blog drafts and revisions");
+        assert_eq!(
+            agents[1].instructions,
+            "Preserve voice, audience, and meaning. Flag claims needing verification."
+        );
+    }
+
+    #[test]
+    fn default_agent_files_accept_additional_agents_and_markdown_prompts() {
+        let agents = Agent::parse_defaults(&[
+            ("01-researcher.md", "---\nname: Researcher\ndescription: Research notes\n---\n\n# Instructions\n\n- Check sources.\n- Preserve citations.\n"),
+            ("02-reviewer.md", "---\nname: Reviewer\ndescription: Review drafts\n---\nReview clarity.\n"),
+            ("03-translator.md", "---\nname: Translator\n---\nPreserve meaning.\n"),
+        ]).unwrap();
+        assert_eq!(agents.len(), 3);
+        assert_eq!(
+            agents[0].instructions,
+            "# Instructions\n\n- Check sources.\n- Preserve citations."
+        );
+        assert_eq!(agents[2].name, "Translator");
+    }
+
+    #[test]
+    fn default_agent_files_reject_empty_invalid_and_duplicate_definitions() {
+        assert!(Agent::parse_defaults(&[]).is_err());
+        for source in [
+            "No frontmatter",
+            "---\nname: Planner\n",                  // Missing closing marker.
+            "---\ndescription: Plans\n---\nPlan.\n", // Missing name.
+            "---\nname: ''\n---\nPlan.\n",
+            "---\nname: Planner\n---\n   \n", // Empty prompt.
+            "---\nname: [Planner]\n---\nPlan.\n",
+        ] {
+            assert!(
+                Agent::parse_defaults(&[("bad.md", source)]).is_err(),
+                "{source}"
+            );
+        }
+        assert!(
+            Agent::parse_defaults(&[
+                ("one.md", "---\nname: Planner\n---\nPlan.\n"),
+                ("two.md", "---\nname: planner\n---\nPlan again.\n"),
+            ])
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn agent_markdown_parser_preserves_body_and_supports_crlf_and_optional_description() {
+        let agent = Agent::parse_markdown(
+            "---\r\nname: Reviewer\r\n---\r\n\r\n# Review\r\n\r\n**Preserve** voice.\r\n",
+        )
+        .unwrap();
+        assert_eq!(agent.name, "Reviewer");
+        assert!(agent.description.is_empty());
+        assert_eq!(agent.instructions, "# Review\n\n**Preserve** voice.");
+    }
+
+    #[test]
+    fn build_embeds_every_agent_markdown_file_in_filename_order() {
+        let directory = Path::new(env!("CARGO_MANIFEST_DIR")).join("assets/agents");
+        let mut filenames = fs::read_dir(directory)
+            .unwrap()
+            .map(|entry| entry.unwrap())
+            .filter(|entry| {
+                entry.file_type().unwrap().is_file()
+                    && entry.path().extension().is_some_and(|ext| ext == "md")
+            })
+            .map(|entry| entry.file_name().to_string_lossy().into_owned())
+            .collect::<Vec<_>>();
+        filenames.sort();
+        assert_eq!(
+            DEFAULT_AGENT_SOURCES
+                .iter()
+                .map(|(name, _)| *name)
+                .collect::<Vec<_>>(),
+            filenames
+        );
+        for &(filename, content) in DEFAULT_AGENT_SOURCES {
+            assert_eq!(
+                content,
+                fs::read_to_string(
+                    Path::new(env!("CARGO_MANIFEST_DIR"))
+                        .join("assets/agents")
+                        .join(filename)
+                )
+                .unwrap()
+            );
+        }
+    }
     fn app() -> App {
         App::new(None).unwrap()
     }

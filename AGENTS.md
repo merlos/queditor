@@ -10,7 +10,8 @@ library. Never imply mock responses are live AI or every provider is account-tes
 ## Architecture
 
 - `src/main.rs`: CLI, terminal lifecycle, event loop; restore terminal state on errors.
-- `src/app.rs`: application state, actions, commands, context, agents, mock proposals.
+- `src/app.rs`: application state, actions, commands, context, embedded/default and custom agents, mock proposals.
+- `assets/agents/*.md`: built-in YAML-frontmatter Markdown agent definitions; `build.rs` embeds all files in filename/picker/rotation order. Numbered filenames preserve the built-in order.
 - `src/document.rs`: Unicode-aware document operations, history, safe file handling.
 - `src/config.rs`: embedded defaults, YAML profiles, semantic theme colors.
 - `src/backend.rs`: genai streaming/tool loop, provider usage/timing, budgets, timeouts, sanitized errors.

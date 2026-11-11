@@ -132,8 +132,12 @@ class SmokeTests(unittest.TestCase):
             doc, app = self.launch(directory)
             app.send(b"\t/agents Blogger\r", b"Agent selected and remembered: Blogger")
             app.send(b"/mode chat\r", b"CHAT mode selected")
-            for label in (b"Blogger Agent", b"Planner Chat", b"Planner Agent", b"Blogger Chat"):
-                app.send(b"\x1b[Z", label)
+            app.send(b"\x1b[Z", b"Blogger Agent")
+            # Additional built-in Markdown files automatically extend the cycle.
+            builtin_count = len(list((ROOT / "assets/agents").glob("*.md")))
+            for _ in range(builtin_count * 2 - 2):
+                app.send(b"\x1b[Z", b"mode selected and remembered")
+            app.send(b"\x1b[Z", b"Blogger Chat")
             # The shortcut also rotates from the editor without moving focus or typing.
             app.send(b"\t\x1b[Z", b"Blogger Agent")
             saved = (root / "config/queditor/config.yaml").read_text()
@@ -153,12 +157,15 @@ class SmokeTests(unittest.TestCase):
             root = Path(directory)
             config = root / "config/queditor"
             (config / "agents").mkdir(parents=True)
-            (config / "agents/reviewer.md").write_text("---\nname: Reviewer\n---\nReview clearly.\n")
+            (config / "agents/reviewer.md").write_text("---\nname: Smoke Reviewer\n---\nReview clearly.\n")
             doc, app = self.launch(directory)
             app.send(b"\t/agents Blogger\r", b"Agent selected and remembered: Blogger")
             app.send(b"/mode agent\r", b"AGENT mode selected")
-            app.send(b"\x1b[Z", b"Reviewer Chat")
-            app.send(b"\x1b[Z", b"Reviewer Agent")
+            builtin_count = len(list((ROOT / "assets/agents").glob("*.md")))
+            for _ in range((builtin_count - 2) * 2):
+                app.send(b"\x1b[Z", b"mode selected and remembered")
+            app.send(b"\x1b[Z", b"Smoke Reviewer Chat")
+            app.send(b"\x1b[Z", b"Smoke Reviewer Agent")
             # Fail the next atomic preferences save at an agent boundary.
             saved = config / "config.yaml"
             original = saved.read_text()
@@ -167,7 +174,7 @@ class SmokeTests(unittest.TestCase):
             saved.symlink_to(backup)
             app.send(b"\x1b[Z", b"Could not remember agent/mode")
             visible = "\n".join("".join(row) for row in app.screen)
-            self.assertIn("Reviewer Agent", visible)
+            self.assertIn("Smoke Reviewer Agent", visible)
             self.assertEqual(backup.read_text(), original)
             app.send(b"\x11")
             app.finish()

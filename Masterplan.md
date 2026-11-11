@@ -87,6 +87,10 @@ Shift+Tab rotates the loaded agent list crossed with the central `AgentMode::ALL
 order, visiting every mode before advancing agents. Custom agents join automatically;
 new modes register in that shared order, also used by Ctrl+G. Agent/mode preferences
 commit in one config save before changing application state; pane focus stays unchanged.
+Built-in agents each have a YAML-frontmatter Markdown file in `assets/agents/`.
+`build.rs` discovers and embeds every `.md` file in filename order, watching for
+edits/additions/removals. Numbered filenames preserve Planner/Blogger ordering.
+The same parser handles runtime custom Markdown files appended after the built-ins.
 
 ### 4. Mock chat/context — basic implementation complete
 

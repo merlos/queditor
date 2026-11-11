@@ -126,9 +126,10 @@ following lines. These shortcuts work in both editing profiles and in the editor
 soft wrapping does not change which logical line they operate on.
 Escape clears unsent input. PageUp/PageDown or the wheel scroll chat. Scrolling
 away from the bottom stops auto-follow until you return to the bottom.
-Shift+Tab cycles agent/mode pairs from either pane without changing focus: Blogger
-Chat → Blogger Agent → Planner Chat → Planner Agent → Blogger Chat with the two
-built-in agents. All loaded custom agents join in agent-list order. Each agent's
+Shift+Tab cycles agent/mode pairs from either pane without changing focus. With
+only Planner and Blogger, the cycle is Blogger Chat → Blogger Agent → Planner
+Chat → Planner Agent → Blogger Chat. Additional built-in and custom agents join
+in agent-list order. Each agent's
 modes are visited in order (currently Chat, then Agent), starting at Chat when
 moving to another agent even if that agent previously remembered Agent mode.
 Ctrl+G cycles only the selected agent's mode; `/mode chat` and `/mode agent`

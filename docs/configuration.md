@@ -99,11 +99,23 @@ editing subsets, not complete emulator/key-chord compatibility.
 
 ## Custom agents
 
-Create `agents/reviewer.md` beneath the configuration directory:
+Built-in agents live in the repository's `assets/agents/`, one Markdown file per
+agent: `01-planner.md`, `02-blogger.md`, and any additional definitions. YAML frontmatter holds `name` and an
+optional `description`; the Markdown body is the prompt, using the same format as
+custom agents below. Names must be nonempty and unique (case-insensitive), and
+built-in prompts must be nonempty.
+
+The build automatically embeds all `.md` files in filename order, which is also
+picker/rotation order. Numbered filenames keep the order explicit. Edit a file or
+add another (for example, `03-reviewer.md`) and rebuild Queditor—no Rust registry
+changes are needed. Installed binaries need no external copy of the files. This
+does not modify your home-directory configuration.
+
+For runtime custom agents, create `agents/copyeditor.md` beneath the configuration directory:
 
 ```markdown
 ---
-name: Reviewer
+name: Copyeditor
 description: Reviews clarity and consistency
 ---
 
@@ -111,9 +123,9 @@ Preserve the writer's meaning and voice. Identify unclear passages and claims
 that need verification. Suggest changes rather than silently rewriting.
 ```
 
-Names must be nonempty and unique, including against Planner/Blogger. Files with
+Names must be nonempty and unique, including against all built-in definitions. Files with
 invalid frontmatter produce a warning while valid files continue loading.
-`/agents` opens the picker; `/agents Reviewer` selects one. Shift+Tab cycles all
+`/agents` opens the picker; `/agents Copyeditor` selects one. Shift+Tab cycles all
 agent/mode pairs: Chat then Agent for each loaded agent before moving to the next.
 Custom agents join automatically after the built-ins in filename order. Ctrl+G
 cycles modes for the current agent only. Selection and per-agent modes are saved.
