@@ -1,3 +1,4 @@
+# Publishing reuses an existing release for this tag and replaces matching artifacts.
 name: Release binaries
 
 on:
@@ -129,9 +130,13 @@ jobs:
       - name: Publish unsigned binaries
         env:
           GH_TOKEN: ${{ github.token }}
-        run: >-
-          gh release create "${GITHUB_REF_NAME}"
-          dist/*
-          --verify-tag
-          --generate-notes
-          --title "Queditor ${GITHUB_REF_NAME}"
+        run: |
+          if gh release view "${GITHUB_REF_NAME}" >/dev/null 2>&1; then
+            gh release upload "${GITHUB_REF_NAME}" dist/* --clobber
+          else
+            gh release create "${GITHUB_REF_NAME}" \
+              dist/* \
+              --verify-tag \
+              --generate-notes \
+              --title "Queditor ${GITHUB_REF_NAME}"
+          fi
