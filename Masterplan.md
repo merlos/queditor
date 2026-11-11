@@ -26,8 +26,11 @@ on Tokio, communicating through bounded channels with `live` orchestration.
 `provider` validates endpoint profiles and creates exact genai targets; `credentials`
 resolves environment, OS-keyring, and private-file references without exposing keys.
 `tools` prepares anchored filesystem capabilities before permission waits, without
-reading text. `storage` handles private recovery/session/grant records outside the
-renderer. `review` owns current edit ranges and manual-edit rebasing/protection;
+reading text and prepares exact-URL web capabilities without DNS/network access.
+`web` performs approved, bounded public HTTP(S) GETs with validated/pinned DNS,
+no credentials/proxies/redirects, and sanitized failures. `storage` handles private
+recovery/session/grant records outside the renderer. `review` owns current edit
+ranges and manual-edit rebasing/protection;
 `Document::replace_and_save` commits editor changes only after a successful save.
 Never call providers inside rendering or synchronous key handling.
 
@@ -47,6 +50,7 @@ Never call providers inside rendering or synchronous key handling.
 8. Mock mode makes no network calls; Chat mode sends explicit context, while Agent
    mode deliberately sends the open document snapshot plus approved tool results.
 9. File permissions are local/exact-path and cannot be overridden by agent prompts.
+   Browsing likewise requires local exact-URL approval before DNS or HTTP requests.
 10. Partial/cancelled/failed turns never apply generated edits or commit model-facing history.
 11. Recovery never writes the original document; session-content persistence is opt-in.
     Enabled recovery requires durable pre-edit checkpoints before auto-save, retained
@@ -124,6 +128,8 @@ Generation still rejects stale snapshots. Review does not delay saving or requir
    temporary backing for an unnamed document.
 10. Add guided provider connection, endpoint-bound credentials, model discovery and
     selection, compaction, cancellation and sanitized provider failures.
+11. Add simple public-web fetching with exact-URL browsing permission before network
+    access, bounded text results, pinned public DNS answers, and no redirects/credentials.
 
 The request/event contracts, Tokio jobs, bounded queues, structured proposal loop,
 permissions/grant revocation, tool capability limits, provider setup/model discovery,

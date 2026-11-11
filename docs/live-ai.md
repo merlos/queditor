@@ -88,6 +88,8 @@ A live prompt sends:
 - In Agent mode, the complete open document; a selection or pinned snapshot is also
   identified as especially important prompt context.
 - File/list results only after local permission approval.
+- Web results only after local permission to browse the exact URL. Fetching contacts
+  that website and sends returned content to the selected AI provider.
 
 Selecting text marks it as important context and sends it with the next live prompt;
 the chat pane shows `Selected line X` for one line or the inclusive one-based range
@@ -147,7 +149,7 @@ cannot undo provider processing or earlier transmissions, or revert a completed 
 edit. Use review Undo for pending saved changes.
 
 Limits: 8 generation rounds, 12 tool calls, 256 KiB attachments/open documents/file
-reads/proposed replacements, 1000 directory entries, 1 MiB generated/tool context, 120-second
+reads/web responses/proposed replacements, 1000 directory entries, 1 MiB generated/tool context, 120-second
 header/stream-read waits, and a ten-minute total deadline including permission
 waits. No automatic retries, avoiding duplicate actions/billing.
 
@@ -175,6 +177,31 @@ credential files and private-key extensions are excluded. Canonicalization check
 symlink targets; capabilities stay anchored across permission waits. Reads check
 file identity and UTF-8/size limits after approval. These are application controls,
 not a complete OS sandbox or a guarantee innocuously named files contain no secrets.
+
+### Permission to browse
+
+Live Chat and Agent modes expose `webfetch` with one argument, `url`. Ask, for
+example, “Fetch https://example.com/ and summarize it.” The agent must request
+permission to browse: the popup shows the exact normalized URL before any DNS
+lookup or HTTP request. Choose once, session, saved, or deny. Session/saved grants
+are scoped to that exact URL (including query), operation, and workspace—not the
+whole website. Denial returns no page content. `/permissions` lists file and web
+grants; `/permissions clear` revokes both. `/new`, `/cd`, and `/resume` clear
+temporary browsing grants too. Mock mode never fetches websites.
+
+Fetching is a simple HTTP(S) GET, not a browser: returns raw UTF-8 text, HTML,
+JSON, or XML; it does not execute JavaScript, follow links, download images, or
+modify the editor. Responses are limited to 256 KiB and the whole fetch (including
+DNS) to 30 seconds. Redirects are not followed: the agent must request separate
+approval for a destination URL. Private/local/non-public IP addresses are blocked,
+including DNS answers, which are pinned for the connection. System proxies are
+disabled. No provider credentials, cookies, or authorization headers are sent.
+URL credentials and fragments are rejected. Query strings are allowed and visible
+in the permission dialog: do not approve URLs containing secrets or sensitive text.
+Approved URLs and page contents can enter committed model history and opt-in
+session persistence. Remote pages are untrusted context, not authorization for
+other tools or editor changes. Escape cancels the fetch but cannot retract an
+already-sent HTTP request.
 
 ## Local state and recovery
 

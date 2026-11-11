@@ -8,7 +8,7 @@ and VS Code-style inline Keep/Undo review of assistant edits.
 **Early prototype:** offline mock mode is the default. Live AI uses
 [`genai`](https://github.com/jeremychone/rust-genai), a multi-provider Rust library
 supporting OpenAI, Anthropic, Gemini, Ollama, OpenRouter, Groq, and more.
-Live requests send chat history, explicitly attached text, and approved file-tool
+Live requests send chat history, explicitly attached text, and approved file/web-tool
 results to the selected provider. **Live Agent edits apply and save automatically
 before review.** Keep confirms them; Undo reverts and saves them. Chat mode is read-only.
 
@@ -102,6 +102,7 @@ entering the UI. `queditor --help` shows CLI options.
 - Temporary-file saves, newline preservation, and disk-change checks at save time.
 - Live streaming, cancellation, model switching, and conversation compaction.
 - Read/list tools with once/session/exact-path persistent permission choices.
+- Permission-gated `webfetch` for public HTTP(S) text/HTML, with exact-URL grants.
 - Private recovery checkpoints with a keyboard/mouse restore picker and opt-in saved sessions.
 
 ## Enable live AI

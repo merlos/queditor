@@ -105,6 +105,8 @@ pub fn definitions() -> Vec<Tool> {
             .with_schema(json!({"type":"object","properties":{"path":{"type":"string"}},"required":["path"],"additionalProperties":false})),
         Tool::new("list_directory").with_description("List a directory after user permission.")
             .with_schema(json!({"type":"object","properties":{"path":{"type":"string"}},"required":["path"],"additionalProperties":false})),
+        Tool::new("webfetch").with_description("Fetch a public HTTP(S) URL after user permission to browse. Returns UTF-8 text or HTML (no JavaScript). No credentials, redirects, or private-network access.")
+            .with_schema(json!({"type":"object","properties":{"url":{"type":"string"}},"required":["url"],"additionalProperties":false})),
         Tool::new("propose_edit").with_description("Propose a complete replacement for the open document snapshot. Never saves or applies changes; the user reviews the diff explicitly.")
             .with_schema(json!({"type":"object","properties":{"replacement":{"type":"string"}},"required":["replacement"],"additionalProperties":false})),
     ]
@@ -266,12 +268,23 @@ async fn conversation(request: Request, sender: &mpsc::Sender<Event>) -> Result<
                     proposed = true;
                     Ok("Edit queued. Queditor will validate, apply and save it after successful completion, then show Keep/Undo review. It is not saved yet.".into())
                 }
-            } else if matches!(call.fn_name.as_str(), "read_file" | "list_directory") {
-                let path = string_arg(&call.fn_arguments, "path")?.to_owned();
+            } else if matches!(
+                call.fn_name.as_str(),
+                "read_file" | "list_directory" | "webfetch"
+            ) {
+                let web = call.fn_name == "webfetch";
+                let path =
+                    string_arg(&call.fn_arguments, if web { "url" } else { "path" })?.to_owned();
                 let workspace = request.workspace.clone();
                 let op = call.fn_name.clone();
-                match tokio::task::spawn_blocking(move || tools::prepare(&workspace, &path, &op))
-                    .await?
+                match tokio::task::spawn_blocking(move || {
+                    if web {
+                        tools::prepare_web(&workspace, &path)
+                    } else {
+                        tools::prepare(&workspace, &path, &op)
+                    }
+                })
+                .await?
                 {
                     Ok(target) => {
                         // Move the anchored capability through the UI and back without reading it.
@@ -283,9 +296,13 @@ async fn conversation(request: Request, sender: &mpsc::Sender<Event>) -> Result<
                             })
                             .await?;
                         if let Some(target) = decision.await.unwrap_or(None) {
-                            tokio::task::spawn_blocking(move || tools::execute(target)).await?
+                            tools::execute_approved(target).await
                         } else {
-                            Err(anyhow::anyhow!("User denied file access"))
+                            Err(anyhow::anyhow!(if web {
+                                "User denied permission to browse"
+                            } else {
+                                "User denied file access"
+                            }))
                         }
                     }
                     Err(e) => Err(e),

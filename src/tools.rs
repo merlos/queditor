@@ -1,4 +1,4 @@
-//! File capabilities are prepared without reading content, then used only after approval.
+//! File and web capabilities are prepared without fetching content, then used after approval.
 use anyhow::{Context, Result, bail};
 use cap_std::{ambient_authority, fs::Dir};
 use serde::{Deserialize, Serialize};
@@ -16,6 +16,15 @@ pub struct Grant {
     pub workspace: PathBuf,
     pub path: PathBuf,
     pub operation: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub url: Option<String>,
+}
+impl Grant {
+    pub fn location(&self) -> String {
+        self.url
+            .clone()
+            .unwrap_or_else(|| self.path.display().to_string())
+    }
 }
 
 #[derive(Default)]
@@ -35,6 +44,17 @@ impl Permissions {
 
 #[derive(Debug)]
 pub struct Target {
+    capability: Capability,
+}
+
+#[derive(Debug)]
+enum Capability {
+    File(FileTarget),
+    Web { workspace: PathBuf, url: url::Url },
+}
+
+#[derive(Debug)]
+struct FileTarget {
     pub workspace: PathBuf,
     pub path: PathBuf,
     pub operation: String,
@@ -44,14 +64,55 @@ pub struct Target {
 }
 impl Target {
     pub fn grant(&self) -> Grant {
-        Grant {
-            workspace: self.workspace.clone(),
-            path: self.path.clone(),
-            operation: self.operation.clone(),
+        match &self.capability {
+            Capability::File(file) => Grant {
+                workspace: file.workspace.clone(),
+                path: file.path.clone(),
+                operation: file.operation.clone(),
+                url: None,
+            },
+            Capability::Web { workspace, url } => Grant {
+                workspace: workspace.clone(),
+                path: PathBuf::new(),
+                operation: "webfetch".into(),
+                url: Some(url.to_string()),
+            },
         }
     }
+    pub fn operation(&self) -> &str {
+        match &self.capability {
+            Capability::File(file) => &file.operation,
+            Capability::Web { .. } => "webfetch",
+        }
+    }
+    pub fn location(&self) -> String {
+        self.grant().location()
+    }
+    pub fn is_web(&self) -> bool {
+        matches!(self.capability, Capability::Web { .. })
+    }
     pub fn outside_workspace(&self) -> bool {
-        !self.path.starts_with(&self.workspace)
+        match &self.capability {
+            Capability::File(file) => !file.path.starts_with(&file.workspace),
+            Capability::Web { .. } => false,
+        }
+    }
+}
+
+/// URL validation is local: DNS resolution and HTTP wait until approval.
+pub fn prepare_web(workspace: &Path, requested: &str) -> Result<Target> {
+    Ok(Target {
+        capability: Capability::Web {
+            workspace: workspace.canonicalize()?,
+            url: crate::web::validate_url(requested)?,
+        },
+    })
+}
+
+pub async fn execute_approved(target: Target) -> Result<String> {
+    match target.capability {
+        Capability::Web { url, .. } => crate::web::fetch(url).await,
+        Capability::File(file) => tokio::task::spawn_blocking(move || execute_file(file)).await?,
     }
 }
 
@@ -114,17 +175,26 @@ pub fn prepare(workspace: &Path, requested: &str, operation: &str) -> Result<Tar
         (Dir::open_ambient_dir(&path, ambient_authority())?, None)
     };
     Ok(Target {
-        workspace,
-        path,
-        operation: operation.into(),
-        dir: Arc::new(dir),
-        filename,
-        metadata,
+        capability: Capability::File(FileTarget {
+            workspace,
+            path,
+            operation: operation.into(),
+            dir: Arc::new(dir),
+            filename,
+            metadata,
+        }),
     })
 }
 
 /// Consume the prepared capability after explicit authorization.
 pub fn execute(target: Target) -> Result<String> {
+    match target.capability {
+        Capability::File(file) => execute_file(file),
+        Capability::Web { .. } => bail!("Web access requires asynchronous execution"),
+    }
+}
+
+fn execute_file(target: FileTarget) -> Result<String> {
     if target.path.canonicalize()? != target.path || sensitive(&target.path) {
         bail!("Tool path changed after permission was requested");
     }
@@ -190,6 +260,48 @@ fn same_file(a: &fs::Metadata, b: &fs::Metadata) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn web_grants_are_exact_urls_operations_and_workspaces() {
+        let dir = tempfile::tempdir().unwrap();
+        let other = tempfile::tempdir().unwrap();
+        let target = prepare_web(dir.path(), "https://example.com/page?q=1").unwrap();
+        let mut permissions = Permissions::default();
+        assert!(!permissions.allows(&target));
+        assert_eq!(target.location(), "https://example.com/page?q=1");
+        assert_eq!(target.operation(), "webfetch");
+        permissions.session.push(target.grant());
+        assert!(permissions.allows(&target));
+        for url in [
+            "https://example.com/page?q=2",
+            "https://example.com/other",
+            "http://example.com/page?q=1",
+        ] {
+            assert!(!permissions.allows(&prepare_web(dir.path(), url).unwrap()));
+        }
+        assert!(
+            !permissions
+                .allows(&prepare_web(other.path(), "https://example.com/page?q=1").unwrap())
+        );
+        permissions.clear_session();
+        assert!(!permissions.allows(&target));
+        permissions.saved.push(target.grant());
+        assert!(permissions.allows(&target));
+    }
+
+    #[test]
+    fn old_file_grants_remain_compatible_and_web_grants_round_trip() {
+        let grant: Grant = serde_json::from_str(
+            r#"{"workspace":"/project","path":"/project/note","operation":"read_file"}"#,
+        )
+        .unwrap();
+        assert!(grant.url.is_none());
+        let dir = tempfile::tempdir().unwrap();
+        let web = prepare_web(dir.path(), "https://example.com/")
+            .unwrap()
+            .grant();
+        let restored: Grant = serde_json::from_str(&serde_json::to_string(&web).unwrap()).unwrap();
+        assert_eq!(web, restored);
+    }
     #[test]
     fn no_implicit_workspace_grants() {
         let dir = tempfile::tempdir().unwrap();

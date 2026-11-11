@@ -18,7 +18,8 @@ library. Never imply mock responses are live AI or every provider is account-tes
 - `src/credentials.rs`: environment/keyring/private-file secret resolution and storage.
 - `src/live.rs`: async job lifecycle, snapshot validation, permission/state orchestration.
 - `src/review.rs`: already-applied edit ranges, manual-edit rebasing, protected Keep/Undo state.
-- `src/tools.rs`: exact-path grants, sensitive exclusions, anchored file capabilities.
+- `src/tools.rs`: exact-path/URL grants, sensitive exclusions, anchored file and prepared web capabilities.
+- `src/web.rs`: permission-gated public HTTP(S) GETs, pinned/validated DNS, bounded UTF-8 responses and sanitized errors.
 - `src/storage.rs`: private versioned recovery/session/permission records and recovery-picker metadata.
 - `src/ui.rs`: rendering and layout; do not perform filesystem/network I/O here.
 - `src/lib.rs`: reusable modules for tests and future clients.
@@ -48,6 +49,7 @@ they acquire real complexity; do not create empty placeholder hierarchies.
 - Do not overwrite external changes or discard dirty content without confirmation.
 - Network/provider integration must go behind a backend boundary and never block rendering.
 - Agent tools must enforce permissions locally, not through prompt instructions.
+- Web tools must obtain exact-URL permission before DNS/network access; reject private/non-public destinations and never forward provider credentials or follow unapproved redirects.
 - File capabilities must not read content before approval; keep them anchored across permission waits.
 - Chat mode is read-only. Agent mode may target the complete open document snapshot;
   current selections and pinned snapshots are important context, not edit boundaries.

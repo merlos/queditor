@@ -233,10 +233,11 @@ class SmokeTests(unittest.TestCase):
 class FakeProvider:
     """Exercises genai's real HTTP/SSE adapter against a local fixture server."""
 
-    def __init__(self, read_path, deny=False):
+    def __init__(self, read_path, deny=False, operation="read_file"):
         self.requests = []
         self.read_path = str(read_path)
         self.deny = deny
+        self.operation = operation
         owner = self
 
         class Handler(BaseHTTPRequestHandler):
@@ -258,8 +259,8 @@ class FakeProvider:
                     self.wfile.flush()
 
                 if turn == 1 or (turn == 2 and not owner.deny):
-                    name = "read_file" if turn == 1 else "propose_edit"
-                    arguments = {"path": owner.read_path} if turn == 1 else {"replacement": "HELLO"}
+                    name = owner.operation if turn == 1 else "propose_edit"
+                    arguments = {"url" if owner.operation == "webfetch" else "path": owner.read_path} if turn == 1 else {"replacement": "HELLO"}
                     chunk({"role": "assistant", "tool_calls": [{"index": 0, "id": f"call-{turn}", "type": "function", "function": {"name": name, "arguments": json.dumps(arguments)}}]})
                     chunk({}, "tool_calls")
                 else:
@@ -294,6 +295,34 @@ class FakeProvider:
 
 
 class LiveSmokeTests(unittest.TestCase):
+    def test_webfetch_requests_permission_to_browse_and_denial_reaches_provider(self):
+        with tempfile.TemporaryDirectory(prefix="queditor-web-permission-") as directory:
+            root = Path(directory)
+            doc = root / "draft.md"
+            doc.write_text("unchanged")
+            config = root / "config"
+            (config / "queditor").mkdir(parents=True)
+            (config / "queditor/config.yaml").write_text("model: genai_1::test\n")
+            # Reserved .example domain: denied browsing must never resolve/fetch it.
+            url = "https://permission-test.example/page?q=rust"
+            provider = FakeProvider(url, deny=True, operation="webfetch")
+            self.addCleanup(provider.close)
+            app = TerminalApp(doc, config, extra_env={"GENAI_1_ENDPOINT": provider.endpoint, "GENAI_1_API_KEY": "local-test-placeholder"}, backend=b"genai_1::test")
+            self.addCleanup(app.close)
+            app.send(b"\t/mode chat\r", b"CHAT mode selected")
+            app.send(b"browse that page\r", b"Allow the agent to browse this URL?")
+            self.assertEqual(len(provider.requests), 1)
+            visible = "\n".join("".join(row) for row in app.screen)
+            self.assertIn(url, visible)
+            names = [tool["function"]["name"] for tool in provider.requests[0]["tools"]]
+            self.assertIn("webfetch", names)
+            self.assertNotIn("propose_edit", names)
+            app.send(b"n", b"Agent finished")
+            self.assertIn("User denied permission to browse", json.dumps(provider.requests))
+            self.assertEqual(doc.read_text(), "unchanged")
+            app.send(b"\x11")
+            app.finish()
+
     def test_untitled_agent_uses_temporary_backing_then_save_as_and_review_undo_use_real_file(self):
         with tempfile.TemporaryDirectory(prefix="queditor-untitled-agent-") as directory:
             root = Path(directory)

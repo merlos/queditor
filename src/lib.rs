@@ -9,3 +9,4 @@ pub mod review;
 pub mod storage;
 pub mod tools;
 pub mod ui;
+pub mod web;

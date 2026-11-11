@@ -1394,7 +1394,7 @@ fn permission(frame: &mut Frame, app: &mut App) {
     let options = [
         ("O", "Allow once"),
         ("S", "Allow for this session"),
-        ("A", "Always allow this exact path and operation"),
+        ("A", "Always allow this exact target and operation"),
         ("N / Esc", "Deny"),
     ];
     app.popup_choice_area = Rect::new(
@@ -1406,17 +1406,29 @@ fn permission(frame: &mut Frame, app: &mut App) {
     app.popup_choice_start = 0;
     let mut lines = vec![
         Line::styled(
-            format!("Allow the agent to {} this path?", prompt.target.operation),
+            if prompt.target.is_web() {
+                "Allow the agent to browse this URL?".into()
+            } else {
+                format!(
+                    "Allow the agent to {} this path?",
+                    prompt.target.operation()
+                )
+            },
             Style::default()
                 .fg(app.theme.yellow)
                 .add_modifier(Modifier::BOLD),
         ),
         Line::styled(
-            safe(&prompt.target.path.display().to_string()),
+            safe(&prompt.target.location()),
             Style::default().fg(app.theme.fg),
         ),
         Line::styled(
-            if prompt.target.outside_workspace() {
+            if prompt.target.is_web() {
+                format!(
+                    "Contacts website · returned data goes to {}",
+                    safe(&app.config.model)
+                )
+            } else if prompt.target.outside_workspace() {
                 format!(
                     "WARNING: outside workspace · data goes to {}",
                     safe(&app.config.model)
@@ -1449,7 +1461,11 @@ fn permission(frame: &mut Frame, app: &mut App) {
             .block(
                 Block::default()
                     .borders(Borders::ALL)
-                    .title(" Agent file permission "),
+                    .title(if prompt.target.is_web() {
+                        " Agent web permission "
+                    } else {
+                        " Agent file permission "
+                    }),
             )
             .style(Style::default().bg(app.theme.bg)),
         popup,

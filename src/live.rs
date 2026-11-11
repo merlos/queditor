@@ -595,9 +595,9 @@ impl App {
         self.notify(
             Level::Info,
             if choice == 3 {
-                "File access denied"
+                "Tool access denied"
             } else {
-                "Exact-path file access approved"
+                "Exact-target tool access approved"
             },
         );
     }
@@ -752,7 +752,7 @@ impl App {
             self.live.permissions.clear_session();
             self.notify(
                 Level::Success,
-                "All saved and temporary file grants revoked",
+                "All saved and temporary tool grants revoked",
             );
         } else {
             let grants = self
@@ -764,7 +764,7 @@ impl App {
                     format!(
                         "ALWAYS {} {} (workspace {})",
                         g.operation,
-                        g.path.display(),
+                        g.location(),
                         g.workspace.display()
                     )
                 })
@@ -773,13 +773,13 @@ impl App {
                         .permissions
                         .session
                         .iter()
-                        .map(|g| format!("SESSION {} {}", g.operation, g.path.display())),
+                        .map(|g| format!("SESSION {} {}", g.operation, g.location())),
                 )
                 .collect::<Vec<_>>();
             self.message(
                 "permissions",
                 if grants.is_empty() {
-                    "No saved/temporary grants; every agent file operation requires permission"
+                    "No saved/temporary grants; every agent file or web operation requires permission"
                         .into()
                 } else {
                     grants.join("\n")
@@ -1322,5 +1322,53 @@ mod tests {
         assert!(result.try_recv().unwrap().is_none());
         assert!(app.live.permissions.saved.is_empty());
         assert!(app.live.permissions.session.is_empty());
+    }
+
+    #[test]
+    fn browsing_waits_for_explicit_local_permission_and_denial_returns_no_capability() {
+        let dir = tempfile::tempdir().unwrap();
+        let (_runtime, mut app, sender) = job_app(None, false);
+        let target = crate::tools::prepare_web(dir.path(), "https://example.com/page").unwrap();
+        let (reply, mut decision) = oneshot::channel();
+        sender
+            .try_send(Event::Permission {
+                target: Box::new(target),
+                reply,
+            })
+            .unwrap();
+        app.poll_live();
+        assert!(app.live.permission.is_some());
+        assert!(matches!(
+            decision.try_recv(),
+            Err(oneshot::error::TryRecvError::Empty)
+        ));
+        app.resolve_permission_choice(3);
+        assert!(decision.try_recv().unwrap().is_none());
+        assert!(app.live.permissions.session.is_empty());
+        assert!(app.live.permissions.saved.is_empty());
+    }
+
+    #[test]
+    fn browsing_session_permission_returns_only_the_approved_url() {
+        let dir = tempfile::tempdir().unwrap();
+        let (_runtime, mut app, sender) = job_app(None, false);
+        let target = crate::tools::prepare_web(dir.path(), "https://example.com/page").unwrap();
+        let grant = target.grant();
+        let (reply, mut decision) = oneshot::channel();
+        sender
+            .try_send(Event::Permission {
+                target: Box::new(target),
+                reply,
+            })
+            .unwrap();
+        app.poll_live();
+        app.resolve_permission_choice(1);
+        assert_eq!(decision.try_recv().unwrap().unwrap().grant(), grant);
+        assert_eq!(app.live.permissions.session, vec![grant]);
+        assert!(
+            !app.live.permissions.allows(
+                &crate::tools::prepare_web(dir.path(), "https://example.com/other").unwrap()
+            )
+        );
     }
 }

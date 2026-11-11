@@ -287,6 +287,7 @@ mod tests {
         assert!(store.recover("../../secret").is_err());
         assert!(store.delete("other", "x").is_err());
         let grant = Grant {
+            url: None,
             workspace: dir.path().into(),
             path: dir.path().join("note"),
             operation: "read_file".into(),
