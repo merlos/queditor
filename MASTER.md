@@ -74,5 +74,5 @@ testing, OS clipboard, full Markdown parsing, wrapping/indent controls, custom
 themes/key chords, and large-file latency remain unfinished. Native unsigned
 release archives and checksums are automated; publishing reuses an existing release
 for a tag and replaces matching artifacts, or creates it if missing. Signing,
-notarization, and package-manager formats remain future work. The marketing site and searchable Markdown
-documentation are automatically deployed to GitHub Pages.
+notarization, and package-manager formats remain future work. The marketing site and
+searchable Markdown documentation are automatically deployed to GitHub Pages.

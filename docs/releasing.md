@@ -33,11 +33,11 @@ It does not create a GitHub Release.
    ```
 
 The workflow refuses a tag that does not exactly equal `v` plus the version in
-`Cargo.toml`. After every target succeeds, it creates a GitHub Release with all
-archives, per-archive checksums, aggregate `SHA256SUMS`, and generated release notes.
+`Cargo.toml`. After every target succeeds, the release contains all archives,
+per-archive checksums, aggregate `SHA256SUMS`, and generated release notes.
 If the tag's release already exists, the workflow uploads its artifacts there and
 replaces any matching artifact names; otherwise, it creates the release. If any target
-fails, no release is published.
+fails, the publishing step is skipped.
 
 Do not reuse or move a published version tag. Fix the issue, increment the version,
 and publish a new tag.
