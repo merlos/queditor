@@ -32,6 +32,7 @@ they acquire real complexity; do not create empty placeholder hierarchies.
 ## Conventions and safety
 
 - Rust 2024, stable toolchain, `cargo fmt`, typed state, explicit errors.
+- Register new agent modes in `AgentMode::ALL`; Shift+Tab and Ctrl+G share this order. Persist agent/mode pair changes together before updating application state.
 - Cursor/selection offsets are UTF-8 bytes at grapheme boundaries.
 - Display columns differ from byte/grapheme offsets; account for tabs and wide glyphs.
 - Ordinary assistant text never mutates documents. A structured live Agent edit applies

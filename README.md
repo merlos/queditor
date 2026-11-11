@@ -63,6 +63,9 @@ entering the UI. `queditor --help` shows CLI options.
 - **Ctrl+A / Ctrl+E** move to line start/end and **Ctrl+K** deletes to line end
   in both the editor and chat prompt, preserving the newline.
 - `/agents` opens a picker: use arrows/Enter or click an agent; Escape cancels.
+- **Shift+Tab** cycles agent/mode pairs from either pane: Blogger Chat → Blogger
+  Agent → Planner Chat → Planner Agent → Blogger Chat (with the built-in agents).
+  Custom agents join the cycle automatically; **Ctrl+G** cycles only the current agent's mode.
 - `/files` browses files; `/open "a file.md"` opens/creates a document.
 - `/save` or **Ctrl+S** opens a filename popup for an unnamed document;
   `/save "draft.md"` supplies the path directly.

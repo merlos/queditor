@@ -83,6 +83,11 @@ Explorer, workspace commands, two themes, two editing profiles, custom editor
 bindings, and cheatsheet. Remaining: custom theme files, key-sequence support,
 comprehensive key validation, hot reload, and richer configuration merging.
 
+Shift+Tab rotates the loaded agent list crossed with the central `AgentMode::ALL`
+order, visiting every mode before advancing agents. Custom agents join automatically;
+new modes register in that shared order, also used by Ctrl+G. Agent/mode preferences
+commit in one config save before changing application state; pane focus stays unchanged.
+
 ### 4. Mock chat/context — basic implementation complete
 
 Composer, slash suggestions, scrollback, agent registry, session reset,

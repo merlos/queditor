@@ -105,7 +105,10 @@ supported; this is not a universal no-retention guarantee.
 ## Edits, cancellation, and limits
 
 Every agent has a remembered mode. Chat mode is read-only and does not expose
-`propose_edit`; it can answer, critique, and describe suggested revisions. Agent
+`propose_edit`. Shift+Tab cycles through each loaded agent's Chat and Agent modes
+from either pane; Ctrl+G cycles modes without switching agents. These shortcuts
+select settings for subsequent prompts, not a new request or an editor change.
+Chat can answer, critique, and describe suggested revisions. Agent
 mode exposes `propose_edit` for a complete replacement of the open document.
 **On successful completion, Queditor validates the snapshot, applies the edit and
 saves the whole file before review**, including existing unsaved text. Unnamed

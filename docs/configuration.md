@@ -113,7 +113,10 @@ that need verification. Suggest changes rather than silently rewriting.
 
 Names must be nonempty and unique, including against Planner/Blogger. Files with
 invalid frontmatter produce a warning while valid files continue loading.
-`/agents` lists definitions; `/agents Reviewer` selects one. Shift+Tab cycles.
+`/agents` opens the picker; `/agents Reviewer` selects one. Shift+Tab cycles all
+agent/mode pairs: Chat then Agent for each loaded agent before moving to the next.
+Custom agents join automatically after the built-ins in filename order. Ctrl+G
+cycles modes for the current agent only. Selection and per-agent modes are saved.
 
 In live mode, the selected agent's instructions become the system prompt. Agent
 instructions never override local permissions or edit-review validation.

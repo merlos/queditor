@@ -126,6 +126,53 @@ class TerminalApp:
 
 
 class SmokeTests(unittest.TestCase):
+    def test_shift_tab_rotates_agent_mode_pairs_and_restores_saved_pair(self):
+        with tempfile.TemporaryDirectory(prefix="queditor-rotation-") as directory:
+            root = Path(directory)
+            doc, app = self.launch(directory)
+            app.send(b"\t/agents Blogger\r", b"Agent selected and remembered: Blogger")
+            app.send(b"/mode chat\r", b"CHAT mode selected")
+            for label in (b"Blogger Agent", b"Planner Chat", b"Planner Agent", b"Blogger Chat"):
+                app.send(b"\x1b[Z", label)
+            # The shortcut also rotates from the editor without moving focus or typing.
+            app.send(b"\t\x1b[Z", b"Blogger Agent")
+            saved = (root / "config/queditor/config.yaml").read_text()
+            self.assertIn("agent: Blogger", saved)
+            self.assertIn("Blogger: agent", saved)
+            app.send(b"\x11")
+            app.finish()
+            self.assertEqual(doc.read_text(), "")
+            restarted = TerminalApp(doc, root / "config")
+            self.addCleanup(restarted.close)
+            restarted.send(b"\t", b"Blogger Agent")
+            restarted.send(b"\x11")
+            restarted.finish()
+
+    def test_shift_tab_custom_agents_join_rotation_and_failed_save_keeps_pair(self):
+        with tempfile.TemporaryDirectory(prefix="queditor-custom-rotation-") as directory:
+            root = Path(directory)
+            config = root / "config/queditor"
+            (config / "agents").mkdir(parents=True)
+            (config / "agents/reviewer.md").write_text("---\nname: Reviewer\n---\nReview clearly.\n")
+            doc, app = self.launch(directory)
+            app.send(b"\t/agents Blogger\r", b"Agent selected and remembered: Blogger")
+            app.send(b"/mode agent\r", b"AGENT mode selected")
+            app.send(b"\x1b[Z", b"Reviewer Chat")
+            app.send(b"\x1b[Z", b"Reviewer Agent")
+            # Fail the next atomic preferences save at an agent boundary.
+            saved = config / "config.yaml"
+            original = saved.read_text()
+            backup = root / "saved-config.yaml"
+            saved.rename(backup)
+            saved.symlink_to(backup)
+            app.send(b"\x1b[Z", b"Could not remember agent/mode")
+            visible = "\n".join("".join(row) for row in app.screen)
+            self.assertIn("Reviewer Agent", visible)
+            self.assertEqual(backup.read_text(), original)
+            app.send(b"\x11")
+            app.finish()
+            self.assertEqual(doc.read_text(), "")
+
     def test_agent_picker_and_prompt_control_line_keys(self):
         with tempfile.TemporaryDirectory(prefix="queditor-picker-prompt-") as directory:
             doc, app = self.launch(directory)
@@ -202,7 +249,7 @@ class SmokeTests(unittest.TestCase):
             config = root / "config"
             app = TerminalApp(doc, config)
             self.addCleanup(app.close)
-            app.send(b"\t\x1b[Z", b"Blogger")
+            app.send(b"\t/agents Blogger\r", b"Blogger")
             app.send(b"/mode agent\r", b"AGENT mode selected")
             visible = "\n".join("".join(row) for row in app.screen)
             self.assertNotIn("you:", visible)

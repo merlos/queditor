@@ -474,6 +474,17 @@ impl App {
         if (self.proposal.is_some() || self.review.is_some()) && self.change_review_key(key) {
             return;
         }
+        if key.code == KeyCode::BackTab
+            || key.code == KeyCode::Tab && key.modifiers == KeyModifiers::SHIFT
+        {
+            if let Err(error) = self.rotate_agent_mode() {
+                self.notify(
+                    Level::Error,
+                    format!("Could not remember agent/mode: {error:#}"),
+                );
+            }
+            return;
+        }
         if key.code == KeyCode::Tab {
             if self.focus == Focus::Chat && !self.completions().is_empty() {
                 self.complete();
@@ -483,17 +494,6 @@ impl App {
                 } else {
                     Focus::Editor
                 };
-            }
-            return;
-        }
-        if key.code == KeyCode::BackTab {
-            if self.focus == Focus::Chat {
-                let next = (self.agent + 1) % self.agents.len();
-                if let Err(error) = self.select_agent(next) {
-                    self.notify(Level::Error, format!("Could not remember agent: {error:#}"));
-                }
-            } else {
-                self.focus = Focus::Chat;
             }
             return;
         }
@@ -1136,7 +1136,7 @@ impl App {
             }
             "/keys" => {
                 let mut text = format!(
-                    "Profile: {}\nGlobal: Tab focus; Ctrl+S save; Ctrl+Q quit\nChat: Enter submit; Ctrl+J newline; Shift+Tab agent; Tab complete; Ctrl+A/E line start/end; Ctrl+K delete to line end\nEditor: arrows, Shift+arrows select, Home/End, PgUp/PgDown\nCopy/paste shortcuts use an internal clipboard; terminal paste is supported.\n",
+                    "Profile: {}\nGlobal: Tab focus; Shift+Tab next agent/mode; Ctrl+G next mode; Ctrl+S save; Ctrl+Q quit\nChat: Enter submit; Ctrl+J newline; Tab complete; Ctrl+A/E line start/end; Ctrl+K delete to line end\nEditor: arrows, Shift+arrows select, Home/End, PgUp/PgDown\nCopy/paste shortcuts use an internal clipboard; terminal paste is supported.\n",
                     self.config.keybindings
                 );
                 for (key, action) in &self.bindings.editor {
@@ -1312,26 +1312,35 @@ impl App {
     }
 
     fn select_agent(&mut self, index: usize) -> Result<()> {
-        let previous_index = self.agent;
-        let previous_name = self.config.agent.clone();
+        let name = self.remember_agent_selection(index, None)?;
+        self.notify(
+            Level::Success,
+            format!("Agent selected and remembered: {name}"),
+        );
+        Ok(())
+    }
+
+    /// Persist an agent/mode pair atomically; failed saves leave both unchanged.
+    fn remember_agent_selection(
+        &mut self,
+        index: usize,
+        mode: Option<AgentMode>,
+    ) -> Result<String> {
         let name = self
             .agents
             .get(index)
             .context("Unknown agent")?
             .name
             .clone();
-        self.agent = index;
-        self.config.agent = name.clone();
-        if let Err(error) = self.config.save() {
-            self.agent = previous_index;
-            self.config.agent = previous_name;
-            return Err(error);
+        let mut config = self.config.clone();
+        config.agent = name.clone();
+        if let Some(mode) = mode {
+            config.agent_modes.insert(name.clone(), mode);
         }
-        self.notify(
-            Level::Success,
-            format!("Agent selected and remembered: {name}"),
-        );
-        Ok(())
+        config.save()?;
+        self.config = config;
+        self.agent = index;
+        Ok(name)
     }
 
     pub fn agent_mode(&self) -> AgentMode {
@@ -1343,16 +1352,11 @@ impl App {
     }
 
     fn select_agent_mode(&mut self, mode: AgentMode) -> Result<()> {
-        let name = self.agents[self.agent].name.clone();
-        let previous = self.config.agent_modes.insert(name.clone(), mode);
-        if let Err(error) = self.config.save() {
-            if let Some(previous) = previous {
-                self.config.agent_modes.insert(name, previous);
-            } else {
-                self.config.agent_modes.remove(&name);
-            }
-            return Err(error);
-        }
+        self.select_agent_with_mode(self.agent, mode)
+    }
+
+    fn select_agent_with_mode(&mut self, index: usize, mode: AgentMode) -> Result<()> {
+        let name = self.remember_agent_selection(index, Some(mode))?;
         self.notify(
             Level::Success,
             format!(
@@ -1369,10 +1373,25 @@ impl App {
     }
 
     fn toggle_agent_mode(&mut self) -> Result<()> {
-        self.select_agent_mode(match self.agent_mode() {
-            AgentMode::Chat => AgentMode::Agent,
-            AgentMode::Agent => AgentMode::Chat,
-        })
+        self.select_agent_mode(self.agent_mode().next())
+    }
+
+    fn rotate_agent_mode(&mut self) -> Result<()> {
+        let current = self.agents.get(self.agent).context("No selected agent")?;
+        let mode = self
+            .config
+            .agent_modes
+            .get(&current.name)
+            .copied()
+            .unwrap_or_default();
+        let next_mode = mode.next();
+        let next_agent = if next_mode == AgentMode::ALL[0] {
+            (self.agent + 1) % self.agents.len()
+        } else {
+            self.agent
+        };
+        // On an agent boundary start at the first mode, not its remembered mode.
+        self.select_agent_with_mode(next_agent, next_mode)
     }
 
     fn connect_key(&mut self, key: KeyEvent) {
@@ -3022,6 +3041,105 @@ mod tests {
         assert_eq!(a.agent_mode(), AgentMode::Agent);
         a.agent = 1;
         assert_eq!(a.agent_mode(), AgentMode::Chat);
+    }
+
+    #[test]
+    fn shift_tab_rotates_every_builtin_pair_from_both_panes_and_encodings() {
+        for focus in [Focus::Editor, Focus::Chat] {
+            for key in [
+                KeyEvent::new(KeyCode::BackTab, KeyModifiers::SHIFT),
+                KeyEvent::new(KeyCode::Tab, KeyModifiers::SHIFT),
+            ] {
+                let mut a = app();
+                a.agents.truncate(2);
+                a.agent = 1; // Blogger Chat, regardless of saved preferences.
+                a.config.agent = "Blogger".into();
+                a.config.agent_modes.clear();
+                // Rotation must not skip Planner Chat because Planner remembers Agent.
+                a.config
+                    .agent_modes
+                    .insert("Planner".into(), AgentMode::Agent);
+                a.focus = focus;
+                a.document.insert("界 draft");
+                a.compose_insert("/ag"); // Must not trigger Tab completion or submission.
+                let revision = a.document.revision;
+                for (agent, mode) in [
+                    ("Blogger", AgentMode::Agent),
+                    ("Planner", AgentMode::Chat),
+                    ("Planner", AgentMode::Agent),
+                    ("Blogger", AgentMode::Chat),
+                ] {
+                    a.key(key);
+                    assert_eq!(a.agents[a.agent].name, agent);
+                    assert_eq!(a.config.agent, agent);
+                    assert_eq!(a.agent_mode(), mode);
+                    assert!(a.focus == focus);
+                    assert_eq!(a.composer, "/ag");
+                    assert_eq!(a.document.text, "界 draft");
+                    assert_eq!(a.document.revision, revision);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn rotation_includes_custom_agents_and_single_agent_wraps_modes() {
+        let mut a = app();
+        a.agents.truncate(2);
+        for name in ["Reviewer", "研究者"] {
+            a.agents.push(Agent {
+                name: name.into(),
+                description: String::new(),
+                instructions: "Custom instructions".into(),
+            });
+        }
+        a.agent = 0;
+        a.config.agent_modes.clear();
+        let pairs = a
+            .agents
+            .iter()
+            .enumerate()
+            .flat_map(|(index, _)| AgentMode::ALL.iter().map(move |mode| (index, *mode)))
+            .collect::<Vec<_>>();
+        for &(index, mode) in pairs.iter().skip(1).chain(pairs.iter().take(1)) {
+            a.rotate_agent_mode().unwrap();
+            assert_eq!((a.agent, a.agent_mode()), (index, mode));
+        }
+        a.agents.truncate(1);
+        for &mode in AgentMode::ALL
+            .iter()
+            .skip(1)
+            .chain(AgentMode::ALL.iter().take(1))
+        {
+            a.rotate_agent_mode().unwrap();
+            assert_eq!((a.agent, a.agent_mode()), (0, mode));
+        }
+    }
+
+    #[test]
+    fn control_g_uses_shared_mode_order_without_switching_agents() {
+        let mut a = app();
+        a.agent = 1;
+        a.config.agent_modes.clear();
+        for &mode in AgentMode::ALL
+            .iter()
+            .skip(1)
+            .chain(AgentMode::ALL.iter().take(1))
+        {
+            a.key(KeyEvent::new(KeyCode::Char('g'), KeyModifiers::CONTROL));
+            assert_eq!((a.agent, a.agent_mode()), (1, mode));
+        }
+    }
+
+    #[test]
+    fn rotation_with_no_agents_returns_error_without_changing_preferences() {
+        let mut a = app();
+        let name = a.config.agent.clone();
+        let modes = a.config.agent_modes.clone();
+        a.agents.clear();
+        assert!(a.rotate_agent_mode().is_err());
+        assert_eq!(a.config.agent, name);
+        assert_eq!(a.config.agent_modes, modes);
     }
     #[test]
     fn stale_proposal_does_not_overwrite_edits() {

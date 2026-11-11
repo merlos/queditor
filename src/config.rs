@@ -44,6 +44,19 @@ pub enum AgentMode {
     Chat,
     Agent,
 }
+impl AgentMode {
+    /// Shared mode order for agent/mode rotation and the current-agent shortcut.
+    /// Register new modes here so navigation does not need mode-specific branches.
+    pub const ALL: &'static [Self] = &[Self::Chat, Self::Agent];
+
+    pub fn next(self) -> Self {
+        let index = Self::ALL
+            .iter()
+            .position(|mode| *mode == self)
+            .expect("Registered agent mode");
+        Self::ALL[(index + 1) % Self::ALL.len()]
+    }
+}
 impl Config {
     pub fn load() -> Result<Self> {
         let path = config_dir().join("config.yaml");
