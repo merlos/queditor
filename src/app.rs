@@ -3262,6 +3262,21 @@ mod tests {
     }
 
     #[test]
+    fn failed_agent_preference_save_preserves_selection_and_modes() {
+        let mut a = app();
+        let name = a.config.agent.clone();
+        let modes = a.config.agent_modes.clone();
+        let index = a.agent;
+        // A directory at the config-file path prevents atomic replacement on
+        // every platform without relying on Unix permission behavior.
+        fs::create_dir_all(config_dir().join("config.yaml")).unwrap();
+        assert!(a.select_agent_with_mode(1, AgentMode::Agent).is_err());
+        assert_eq!(a.agent, index);
+        assert_eq!(a.config.agent, name);
+        assert_eq!(a.config.agent_modes, modes);
+    }
+
+    #[test]
     fn rotation_with_no_agents_returns_error_without_changing_preferences() {
         let mut a = app();
         let name = a.config.agent.clone();

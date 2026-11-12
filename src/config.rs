@@ -240,7 +240,9 @@ pub fn validate_model(model: &str) -> Result<()> {
     Ok(())
 }
 pub fn config_dir() -> PathBuf {
-    #[cfg(windows)]
+    #[cfg(test)]
+    return test_config_dir();
+    #[cfg(all(windows, not(test)))]
     {
         return std::env::var_os("APPDATA")
             .map(PathBuf::from)
@@ -252,7 +254,7 @@ pub fn config_dir() -> PathBuf {
             .unwrap_or_else(|| PathBuf::from("."))
             .join("queditor");
     }
-    #[cfg(not(windows))]
+    #[cfg(all(not(windows), not(test)))]
     std::env::var_os("XDG_CONFIG_HOME")
         .map(PathBuf::from)
         .unwrap_or_else(|| {
@@ -262,6 +264,16 @@ pub fn config_dir() -> PathBuf {
                 .join(".config")
         })
         .join("queditor")
+}
+
+#[cfg(test)]
+pub(crate) fn test_config_dir() -> PathBuf {
+    // Each test thread owns its files: parallel saves must not collide or touch
+    // the user's configuration, bindings, agents, or credentials.
+    thread_local! {
+        static DIRECTORY: tempfile::TempDir = tempfile::tempdir().expect("Test config directory");
+    }
+    DIRECTORY.with(|directory| directory.path().join("config"))
 }
 
 #[derive(Clone, Debug, Deserialize, Default)]
@@ -397,6 +409,30 @@ impl Theme {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn test_config_is_isolated_and_preferences_round_trip() {
+        let original = Config::load().unwrap();
+        let threads = ["Planner", "Blogger"].map(|agent| {
+            std::thread::spawn(move || {
+                let mut config = Config::load().unwrap();
+                assert_eq!(config.agent, Config::default().agent);
+                config.agent = agent.into();
+                config.agent_modes.insert(agent.into(), AgentMode::Agent);
+                config.save().unwrap();
+                let restored = Config::load().unwrap();
+                assert_eq!(restored.agent, agent);
+                assert_eq!(restored.agent_modes[agent], AgentMode::Agent);
+                config_dir()
+            })
+        });
+        let [first, second] = threads.map(|thread| thread.join().unwrap());
+        assert_ne!(first, second);
+        assert_ne!(first, config_dir());
+        let restored = Config::load().unwrap();
+        assert_eq!(restored.agent, original.agent);
+        assert_eq!(restored.agent_modes, original.agent_modes);
+    }
+
     #[test]
     fn partial_config_uses_defaults() {
         let c: Config = serde_yaml_ng::from_str("theme: daylight").unwrap();

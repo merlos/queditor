@@ -190,7 +190,9 @@ impl Store {
 }
 
 pub fn state_dir() -> PathBuf {
-    #[cfg(windows)]
+    #[cfg(test)]
+    return crate::config::test_config_dir().with_file_name("state");
+    #[cfg(all(windows, not(test)))]
     {
         return std::env::var_os("LOCALAPPDATA")
             .map(PathBuf::from)
@@ -202,7 +204,7 @@ pub fn state_dir() -> PathBuf {
             .unwrap_or_else(|| PathBuf::from("."))
             .join("queditor");
     }
-    #[cfg(not(windows))]
+    #[cfg(all(not(windows), not(test)))]
     std::env::var_os("XDG_STATE_HOME")
         .map(PathBuf::from)
         .unwrap_or_else(|| {
@@ -335,7 +337,9 @@ mod tests {
         document.insert("private contents must not appear in labels");
         store.agent_checkpoint(&older, document.recovery()).unwrap();
         store.agent_checkpoint(&newer, document.recovery()).unwrap();
-        fs::File::open(store.path("recovery", &older).unwrap())
+        fs::OpenOptions::new()
+            .write(true)
+            .open(store.path("recovery", &older).unwrap())
             .unwrap()
             .set_modified(std::time::UNIX_EPOCH + std::time::Duration::from_secs(100))
             .unwrap();
