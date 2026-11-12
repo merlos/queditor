@@ -62,6 +62,9 @@ entering the UI. `queditor --help` shows CLI options.
   works if your terminal reports it distinctly.
 - **Ctrl+A / Ctrl+E** move to line start/end and **Ctrl+K** deletes to line end
   in both the editor and chat prompt, preserving the newline.
+- Select prompt text with **Shift+arrows** or mouse dragging; **Ctrl+C/X/V** copies,
+  cuts, and pastes with the default profile. Drag agent reply text to select and
+  copy it; replies stay read-only. **Ctrl+Shift+A** selects the whole prompt or clicked message.
 - `/agents` opens a picker: use arrows/Enter or click an agent; Escape cancels.
 - **Shift+Tab** cycles agent/mode pairs from either pane, visiting Chat then Agent
   before advancing to the next agent. Additional agents join automatically;
@@ -94,9 +97,12 @@ entering the UI. `queditor --help` shows CLI options.
   Filename and dirty marker precede cursor position in the bottom status line.
 - Distinct You/agent label colors, matching prompt agent color, and source-preserving
   Markdown highlighting in bot replies; activity spinners smoothly cycle rainbow colors.
-- Undo/redo, internal copy/cut/paste, terminal bracketed paste.
+- Undo/redo, shared internal copy/cut/paste in editor and prompt, selectable/copyable
+  agent replies, terminal bracketed paste.
 - Basic source-preserving Markdown/frontmatter colors.
 - Wide/narrow layouts, status messages, file explorer, search/replace commands.
+- Word-boundary soft wrapping in the editor, prompt, chat, and wrapping UI text;
+  overlong words split safely without changing the source.
 - Per-request provider token counts and output tk/s; running token totals, document
   word/character counts, and UTF-8 size in the bottom bar.
 - Mocha/daylight themes, VS Code-style and Emacs-style editing presets.

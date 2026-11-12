@@ -184,6 +184,25 @@ pub struct SavePrompt {
     pub error: Option<String>,
 }
 
+#[derive(Clone, Copy)]
+pub(crate) struct ChatRow {
+    pub message: usize,
+    pub row: ComposerRow,
+    pub left: usize,
+}
+
+pub struct MessageSelection {
+    pub message: usize,
+    pub anchor: usize,
+    pub cursor: usize,
+}
+
+#[derive(Clone, Copy)]
+enum ChatDrag {
+    Composer,
+    Message(usize),
+}
+
 pub struct App {
     pub live: crate::live::Live,
     pub document: Document,
@@ -195,6 +214,12 @@ pub struct App {
     pub messages: Vec<Message>,
     pub composer: String,
     pub composer_cursor: usize,
+    pub composer_anchor: Option<usize>,
+    pub message_selection: Option<MessageSelection>,
+    pub(crate) chat_view_rows: Vec<Option<ChatRow>>,
+    pub(crate) chat_history_area: Rect,
+    pub(crate) composer_view_rows: Vec<ComposerRow>,
+    chat_drag: Option<ChatDrag>,
     prompt_history: Vec<String>,
     prompt_history_index: Option<usize>,
     prompt_history_draft: String,
@@ -349,6 +374,12 @@ impl App {
             messages: vec![],
             composer: String::new(),
             composer_cursor: 0,
+            composer_anchor: None,
+            message_selection: None,
+            chat_view_rows: vec![],
+            chat_history_area: Rect::default(),
+            composer_view_rows: vec![],
+            chat_drag: None,
             prompt_history: vec![],
             prompt_history_index: None,
             prompt_history_draft: String::new(),
@@ -507,8 +538,10 @@ impl App {
         }
         if ctrl
             && key.code == KeyCode::Char('c')
+            && !key.modifiers.contains(KeyModifiers::SHIFT)
             && (self.focus == Focus::Chat || self.live.permission.is_some())
             && self.busy()
+            && (self.live.permission.is_some() || self.chat_selected_text().is_none())
         {
             self.cancel_live();
             return;
@@ -669,6 +702,60 @@ impl App {
 
     fn chat_key(&mut self, key: KeyEvent) {
         let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+        let shift = key.modifiers.contains(KeyModifiers::SHIFT);
+        let action = self.bindings.editor.get(&key_name(key)).map(String::as_str);
+        if action == Some("copy") || ctrl && matches!(key.code, KeyCode::Char('c' | 'C')) {
+            if let Some(text) = self.chat_selected_text() {
+                self.clipboard = text;
+                self.notify(Level::Success, "Copied to Queditor's internal clipboard");
+            }
+            return;
+        }
+        if action == Some("cut") {
+            if self.message_selection.is_none()
+                && let Some(text) = self.chat_selected_text()
+            {
+                self.clipboard = text;
+                self.compose_insert("");
+            }
+            return;
+        }
+        if action == Some("paste") {
+            self.compose_insert(&self.clipboard.clone());
+            return;
+        }
+        if ctrl && shift && matches!(key.code, KeyCode::Char('a' | 'A')) {
+            if let Some(selection) = &mut self.message_selection {
+                selection.anchor = 0;
+                selection.cursor = self
+                    .messages
+                    .get(selection.message)
+                    .map_or(0, |message| display_text(&message.text).len());
+            } else {
+                self.composer_anchor = Some(0);
+                self.composer_cursor = self.composer.len();
+            }
+            return;
+        }
+        let old_cursor = self.composer_cursor;
+        let old_selection = self.composer_selection();
+        let moving = matches!(
+            key.code,
+            KeyCode::Left
+                | KeyCode::Right
+                | KeyCode::Home
+                | KeyCode::End
+                | KeyCode::Up
+                | KeyCode::Down
+        ) || ctrl && matches!(key.code, KeyCode::Char('a' | 'e'));
+        if moving {
+            self.message_selection = None;
+            if shift {
+                self.composer_anchor.get_or_insert(old_cursor);
+            } else {
+                self.composer_anchor = None;
+            }
+        }
         match key.code {
             KeyCode::Enter if key.modifiers.contains(KeyModifiers::SHIFT) => {
                 self.compose_insert("\n")
@@ -681,6 +768,10 @@ impl App {
             }
             KeyCode::Char('e') if ctrl => self.composer_cursor = self.composer_line_end(),
             KeyCode::Char('k') if ctrl => {
+                if self.composer_selection().is_some() {
+                    self.compose_insert("");
+                    return;
+                }
                 let end = self.composer_line_end();
                 if end > self.composer_cursor {
                     self.stop_browsing_prompt_history();
@@ -694,10 +785,27 @@ impl App {
                 }
                 self.submit();
             }
-            KeyCode::Left => self.composer_cursor = previous(&self.composer, self.composer_cursor),
-            KeyCode::Right => self.composer_cursor = next(&self.composer, self.composer_cursor),
+            KeyCode::Left => {
+                self.composer_cursor = if !shift {
+                    old_selection.as_ref().map(|range| range.start)
+                } else {
+                    None
+                }
+                .unwrap_or_else(|| previous(&self.composer, self.composer_cursor))
+            }
+            KeyCode::Right => {
+                self.composer_cursor = if !shift {
+                    old_selection.as_ref().map(|range| range.end)
+                } else {
+                    None
+                }
+                .unwrap_or_else(|| next(&self.composer, self.composer_cursor))
+            }
             KeyCode::Home => self.composer_cursor = 0,
             KeyCode::End => self.composer_cursor = self.composer.len(),
+            KeyCode::Backspace | KeyCode::Delete if self.composer_selection().is_some() => {
+                self.compose_insert("");
+            }
             KeyCode::Backspace if self.composer_cursor > 0 => {
                 self.stop_browsing_prompt_history();
                 let start = previous(&self.composer, self.composer_cursor);
@@ -711,14 +819,14 @@ impl App {
                 );
                 self.stop_browsing_prompt_history();
             }
-            KeyCode::Up if !self.completions().is_empty() => {
+            KeyCode::Up if !shift && !self.completions().is_empty() => {
                 self.completion = self.completion.saturating_sub(1)
             }
-            KeyCode::Down if !self.completions().is_empty() => {
+            KeyCode::Down if !shift && !self.completions().is_empty() => {
                 self.completion = (self.completion + 1).min(self.completions().len() - 1)
             }
-            KeyCode::Up => self.composer_vertical(-1),
-            KeyCode::Down => self.composer_vertical(1),
+            KeyCode::Up => self.composer_vertical(-1, shift),
+            KeyCode::Down => self.composer_vertical(1, shift),
             KeyCode::PageUp => {
                 self.follow_chat = false;
                 self.chat_scroll = self.chat_scroll.saturating_sub(10);
@@ -727,6 +835,10 @@ impl App {
                 self.chat_scroll += 10;
             }
             KeyCode::Esc => {
+                if self.message_selection.take().is_some() || self.composer_anchor.take().is_some()
+                {
+                    return;
+                }
                 self.composer.clear();
                 self.composer_cursor = 0;
                 self.stop_browsing_prompt_history();
@@ -748,6 +860,25 @@ impl App {
             .map_or(self.composer.len(), |index| self.composer_cursor + index)
     }
 
+    pub fn composer_selection(&self) -> Option<Range<usize>> {
+        self.composer_anchor
+            .filter(|anchor| *anchor != self.composer_cursor)
+            .map(|anchor| anchor.min(self.composer_cursor)..anchor.max(self.composer_cursor))
+    }
+
+    fn chat_selected_text(&self) -> Option<String> {
+        if let Some(selection) = &self.message_selection {
+            let text = display_text(&self.messages.get(selection.message)?.text);
+            let range =
+                selection.anchor.min(selection.cursor)..selection.anchor.max(selection.cursor);
+            return (!range.is_empty())
+                .then(|| text.get(range).map(str::to_owned))
+                .flatten();
+        }
+        self.composer_selection()
+            .map(|range| self.composer[range].to_owned())
+    }
+
     fn complete(&mut self) {
         let choices = self.completions();
         if let Some(c) = choices
@@ -757,14 +888,20 @@ impl App {
         {
             self.composer = format!("{c} ");
             self.composer_cursor = self.composer.len();
+            self.composer_anchor = None;
             self.completion = 0;
         }
     }
 
     pub fn compose_insert(&mut self, text: &str) {
         self.stop_browsing_prompt_history();
-        self.composer.insert_str(self.composer_cursor, text);
-        let end = self.composer_cursor + text.len();
+        self.message_selection = None;
+        let range = self
+            .composer_selection()
+            .unwrap_or(self.composer_cursor..self.composer_cursor);
+        let end = range.start + text.len();
+        self.composer.replace_range(range, text);
+        self.composer_anchor = None;
         self.composer_cursor = unicode_segmentation::UnicodeSegmentation::grapheme_indices(
             self.composer.as_str(),
             true,
@@ -775,7 +912,7 @@ impl App {
         self.completion = 0;
     }
 
-    fn composer_vertical(&mut self, delta: isize) {
+    fn composer_vertical(&mut self, delta: isize, selecting: bool) {
         let width = usize::from(self.composer_area.width).max(1);
         let rows = composer_rows(&self.composer, width);
         let row = rows
@@ -783,11 +920,15 @@ impl App {
             .rposition(|row| row.start <= self.composer_cursor)
             .unwrap_or(0);
         if delta < 0 && row == 0 {
-            self.previous_prompt();
+            if !selecting {
+                self.previous_prompt();
+            }
             return;
         }
         if delta > 0 && row + 1 == rows.len() {
-            self.next_prompt();
+            if !selecting {
+                self.next_prompt();
+            }
             return;
         }
         let target = row.saturating_add_signed(delta).min(rows.len() - 1);
@@ -818,6 +959,7 @@ impl App {
         } else {
             self.composer = std::mem::take(&mut self.prompt_history_draft);
             self.composer_cursor = self.composer.len();
+            self.composer_anchor = None;
             self.prompt_history_index = None;
         }
     }
@@ -825,6 +967,7 @@ impl App {
     fn load_prompt_history(&mut self, index: usize) {
         self.composer.clone_from(&self.prompt_history[index]);
         self.composer_cursor = self.composer.len();
+        self.composer_anchor = None;
         self.prompt_history_index = Some(index);
         self.completion = 0;
     }
@@ -835,11 +978,17 @@ impl App {
     }
 
     pub(crate) fn clear_prompt_history(&mut self) {
+        self.message_selection = None;
+        self.composer_anchor = None;
+        self.chat_view_rows.clear();
         self.prompt_history.clear();
         self.stop_browsing_prompt_history();
     }
 
     pub(crate) fn rebuild_prompt_history(&mut self) {
+        self.message_selection = None;
+        self.composer_anchor = None;
+        self.chat_view_rows.clear();
         self.prompt_history = self
             .messages
             .iter()
@@ -941,6 +1090,8 @@ impl App {
         self.stop_browsing_prompt_history();
         self.composer.clear();
         self.composer_cursor = 0;
+        self.composer_anchor = None;
+        self.message_selection = None;
         self.completion = 0;
     }
 
@@ -1182,7 +1333,7 @@ impl App {
             }
             "/keys" => {
                 let mut text = format!(
-                    "Profile: {}\nGlobal: Tab focus; Shift+Tab next agent/mode; Ctrl+G next mode; Ctrl+S save; Ctrl+Q quit\nChat: Enter submit; Ctrl+J newline; Tab complete; Ctrl+A/E line start/end; Ctrl+K delete to line end\nEditor: arrows, Shift+arrows select, Home/End, PgUp/PgDown\nCopy/paste shortcuts use an internal clipboard; terminal paste is supported.\n",
+                    "Profile: {}\nGlobal: Tab focus; Shift+Tab next agent/mode; Ctrl+G next mode; Ctrl+S save; Ctrl+Q quit\nChat: Enter submit; Ctrl+J newline; Tab complete; Ctrl+A/E line start/end; Ctrl+K delete to line end; Shift+arrows select prompt; Ctrl+Shift+A selects all in prompt/clicked message; drag message text to select and copy\nEditor: arrows, Shift+arrows select, Home/End, PgUp/PgDown\nCopy/cut/paste bindings also work in the prompt; messages are read-only. Shortcuts use an internal clipboard; terminal paste is supported.\n",
                     self.config.keybindings
                 );
                 for (key, action) in &self.bindings.editor {
@@ -2271,8 +2422,82 @@ impl App {
         }
         let x = event.column;
         let y = event.row;
+        if self.explorer.is_none()
+            && self.chat_area.contains((x, y).into())
+            && matches!(
+                event.kind,
+                MouseEventKind::Down(MouseButton::Left) | MouseEventKind::Drag(MouseButton::Left)
+            )
+        {
+            let down = matches!(event.kind, MouseEventKind::Down(_));
+            self.focus = Focus::Chat;
+            if self.composer_area.contains((x, y).into())
+                && (down || matches!(self.chat_drag, Some(ChatDrag::Composer)))
+            {
+                if let Some(row) = self
+                    .composer_view_rows
+                    .get(usize::from(y - self.composer_area.y))
+                    .copied()
+                {
+                    let position = composer_position_at_display(
+                        &self.composer,
+                        row,
+                        usize::from(x - self.composer_area.x),
+                    );
+                    if down {
+                        self.message_selection = None;
+                        self.composer_anchor = if event.modifiers.contains(KeyModifiers::SHIFT) {
+                            Some(self.composer_anchor.unwrap_or(self.composer_cursor))
+                        } else {
+                            Some(position)
+                        };
+                        self.chat_drag = Some(ChatDrag::Composer);
+                    }
+                    self.composer_cursor = position;
+                }
+                return;
+            }
+            if self.chat_history_area.contains((x, y).into()) {
+                let hit = self
+                    .chat_view_rows
+                    .get(usize::from(y - self.chat_history_area.y))
+                    .copied()
+                    .flatten();
+                if let Some(hit) = hit
+                    && (down
+                        || matches!(self.chat_drag, Some(ChatDrag::Message(index)) if index == hit.message))
+                    && let Some(message) = self.messages.get(hit.message)
+                {
+                    let text = display_text(&message.text);
+                    let position = composer_position_at_display(
+                        &text,
+                        hit.row,
+                        usize::from(x - self.chat_history_area.x).saturating_sub(hit.left),
+                    );
+                    if down {
+                        self.composer_anchor = None;
+                        self.message_selection = Some(MessageSelection {
+                            message: hit.message,
+                            anchor: position,
+                            cursor: position,
+                        });
+                        self.chat_drag = Some(ChatDrag::Message(hit.message));
+                        self.follow_chat = false;
+                    } else if let Some(selection) = &mut self.message_selection {
+                        selection.cursor = position;
+                    }
+                    return;
+                }
+            }
+            if down {
+                self.message_selection = None;
+                self.composer_anchor = None;
+                self.chat_drag = None;
+            }
+        }
         if self.editor_area.contains((x, y).into()) {
             if event.kind == MouseEventKind::Down(MouseButton::Left) {
+                self.chat_drag = None;
                 self.sync_review();
                 if let Some((_, index, keep)) = self
                     .review_buttons
@@ -2365,6 +2590,7 @@ impl App {
         }
         if matches!(event.kind, MouseEventKind::Up(_)) {
             self.dragging = false;
+            self.chat_drag = None;
         }
     }
 
@@ -2592,32 +2818,61 @@ pub(crate) struct ComposerRow {
 }
 
 pub(crate) fn composer_rows(text: &str, width: usize) -> Vec<ComposerRow> {
+    word_wrapped_rows(text, width, false)
+}
+
+/// Source-preserving visual rows. Editor tabs use logical-line columns; prompt
+/// and message tabs use visual-row columns. Trailing separators stay attached
+/// to the preceding row, even when their invisible cells are clipped.
+pub(crate) fn word_wrapped_rows(text: &str, width: usize, logical_tabs: bool) -> Vec<ComposerRow> {
     use unicode_segmentation::UnicodeSegmentation;
 
     let width = width.max(1);
     let mut rows = Vec::new();
-    let mut start = 0;
-    let mut column = 0;
-    for (byte, grapheme) in text.grapheme_indices(true) {
-        if grapheme == "\n" {
-            rows.push(ComposerRow { start, end: byte });
-            start = byte + 1;
-            column = 0;
-            continue;
+    let mut offset = 0;
+    for line in text.split('\n') {
+        let graphemes = line.grapheme_indices(true).collect::<Vec<_>>();
+        // Cache remaining word widths to avoid rescanning long unbroken text.
+        let mut words = vec![0; graphemes.len() + 1];
+        for (index, (_, grapheme)) in graphemes.iter().enumerate().rev() {
+            if !grapheme.chars().all(char::is_whitespace) {
+                words[index] = grapheme_width(grapheme, 0) + words[index + 1];
+            }
         }
-        let mut grapheme_columns = grapheme_width(grapheme, column);
-        if column > 0 && column + grapheme_columns > width {
-            rows.push(ComposerRow { start, end: byte });
-            start = byte;
-            column = 0;
-            grapheme_columns = grapheme_width(grapheme, 0);
+        let mut start = 0;
+        let mut column = 0;
+        let mut logical_column = 0;
+        let mut has_word = false;
+        for (index, &(byte, grapheme)) in graphemes.iter().enumerate() {
+            let whitespace = grapheme.chars().all(char::is_whitespace);
+            let word_start = !whitespace
+                && (index == 0 || graphemes[index - 1].1.chars().all(char::is_whitespace));
+            let mut cells =
+                grapheme_width(grapheme, if logical_tabs { logical_column } else { column });
+            let move_word = word_start && words[index] <= width && column + words[index] > width;
+            let overflow = column + cells > width && !(whitespace && has_word);
+            if byte > start && (move_word || overflow) {
+                rows.push(ComposerRow {
+                    start: offset + start,
+                    end: offset + byte,
+                });
+                start = byte;
+                column = 0;
+                has_word = false;
+                if !logical_tabs {
+                    cells = grapheme_width(grapheme, 0);
+                }
+            }
+            column += cells;
+            logical_column += cells;
+            has_word |= !whitespace;
         }
-        column += grapheme_columns;
+        rows.push(ComposerRow {
+            start: offset + start,
+            end: offset + line.len(),
+        });
+        offset += line.len() + 1;
     }
-    rows.push(ComposerRow {
-        start,
-        end: text.len(),
-    });
     rows
 }
 
@@ -2633,7 +2888,11 @@ fn composer_position_at_display(text: &str, row: ComposerRow, target: usize) -> 
     use unicode_segmentation::UnicodeSegmentation;
 
     let mut column = 0;
-    for (byte, grapheme) in text[row.start..row.end].grapheme_indices(true) {
+    let Some(content) = text.get(row.start..row.end) else {
+        // A queued mouse event may still carry coordinates from before an edit.
+        return text.len();
+    };
+    for (byte, grapheme) in content.grapheme_indices(true) {
         let width = grapheme_width(grapheme, column);
         if target < column + width {
             return row.start + byte;
@@ -2641,6 +2900,19 @@ fn composer_position_at_display(text: &str, row: ComposerRow, target: usize) -> 
         column += width;
     }
     row.end
+}
+
+/// Sanitize terminal controls consistently for reply rendering, selection and copy.
+pub(crate) fn display_text(text: &str) -> String {
+    text.chars()
+        .map(|c| {
+            if c.is_control() && c != '\n' && c != '\t' {
+                '�'
+            } else {
+                c
+            }
+        })
+        .collect()
 }
 
 fn key_name(key: KeyEvent) -> String {
@@ -3361,6 +3633,81 @@ mod tests {
         a.paste("one\ntwo");
         assert_eq!(a.composer, "one\ntwo");
         assert_eq!(a.messages.len(), before);
+    }
+    #[test]
+    fn prompt_selection_copy_cut_and_paste_are_unicode_safe_in_both_profiles() {
+        for (profile, copy, cut, paste) in [
+            (
+                "vscode",
+                KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL),
+                'x',
+                'v',
+            ),
+            (
+                "emacs",
+                KeyEvent::new(KeyCode::Char('w'), KeyModifiers::ALT),
+                'w',
+                'y',
+            ),
+        ] {
+            let mut a = app();
+            a.focus = Focus::Chat;
+            a.bindings = Bindings::load(profile).unwrap();
+            a.compose_insert("hi 界e\u{301}👩‍💻");
+            let before = a.messages.len();
+            for _ in 0..3 {
+                a.key(KeyEvent::new(KeyCode::Left, KeyModifiers::SHIFT));
+            }
+            assert_eq!(a.chat_selected_text().as_deref(), Some("界e\u{301}👩‍💻"));
+            a.key(copy);
+            assert_eq!(a.clipboard, "界e\u{301}👩‍💻");
+            a.key(KeyEvent::new(KeyCode::Char(cut), KeyModifiers::CONTROL));
+            assert_eq!(a.composer, "hi ");
+            a.key(KeyEvent::new(KeyCode::Char(paste), KeyModifiers::CONTROL));
+            assert_eq!(a.composer, "hi 界e\u{301}👩‍💻");
+            assert!(a.composer_anchor.is_none());
+            assert_eq!(a.messages.len(), before);
+            assert!(a.document.text.is_empty());
+        }
+    }
+
+    #[test]
+    fn prompt_select_all_replacement_deletion_and_escape_preserve_unsent_text() {
+        let mut a = app();
+        a.focus = Focus::Chat;
+        a.compose_insert("one\ntwo");
+        a.key(KeyEvent::new(
+            KeyCode::Char('A'),
+            KeyModifiers::CONTROL | KeyModifiers::SHIFT,
+        ));
+        a.paste("new\nprompt");
+        assert_eq!(a.composer, "new\nprompt");
+        assert!(a.composer_anchor.is_none());
+        a.key(KeyEvent::new(KeyCode::Left, KeyModifiers::SHIFT));
+        a.key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        assert_eq!(a.composer, "new\nprompt");
+        a.key(KeyEvent::new(KeyCode::Left, KeyModifiers::SHIFT));
+        a.key(KeyEvent::new(KeyCode::Delete, KeyModifiers::NONE));
+        assert_eq!(a.composer, "new\npromt");
+        a.key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        assert!(a.composer.is_empty());
+    }
+
+    #[test]
+    fn shifted_prompt_arrows_select_instead_of_recalling_history() {
+        let mut a = app();
+        a.focus = Focus::Chat;
+        a.config.model = "mock".into();
+        a.compose_insert("old prompt");
+        a.submit();
+        a.compose_insert("one\ntwo");
+        a.composer_area = Rect::new(0, 0, 40, 3);
+        a.key(KeyEvent::new(KeyCode::Up, KeyModifiers::SHIFT));
+        a.key(KeyEvent::new(KeyCode::Up, KeyModifiers::SHIFT));
+        assert_eq!(a.composer, "one\ntwo");
+        assert_eq!(a.chat_selected_text().as_deref(), Some("\ntwo"));
+        a.key(KeyEvent::new(KeyCode::Home, KeyModifiers::NONE));
+        assert!(a.composer_anchor.is_none());
     }
     #[test]
     fn prompt_history_recalls_submissions_and_restores_draft() {

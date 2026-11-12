@@ -146,14 +146,15 @@ unsaved mock previews with explicit acceptance; they do not invoke a model.
 
 Escape from either pane always stops active generation, streaming, tool execution,
 provider waits, or permission waits and drops pending tool/proposal events. `/cancel`
-and Ctrl+C in chat remain alternatives. Partial output remains visibly
+and Ctrl+C in chat without selected text remain alternatives. With selected text,
+Ctrl+C copies instead of cancelling. Partial output remains visibly
 marked incomplete/cancelled and is not committed as model history. Cancellation
 cannot undo provider processing or earlier transmissions, or revert a completed saved
 edit. Use review Undo for pending saved changes.
 
 Limits: 8 generation rounds, 12 tool calls, 256 KiB attachments/open documents/file
-reads/web responses/proposed replacements, 1000 directory entries, 1 MiB generated/tool context, 120-second
-header/stream-read waits, and a ten-minute total deadline including permission
+reads/web responses/proposed replacements, 1000 directory entries, 1 MiB generated/tool context, 60-second
+provider connection waits, thirty-minute header/stream-read waits, and a thirty-minute total deadline including permission
 waits. No automatic retries, avoiding duplicate actions/billing.
 
 `/compact` summarizes committed history without tools, replacing model-facing

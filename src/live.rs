@@ -1257,6 +1257,23 @@ mod tests {
         assert!(sender.try_send(Event::Text("late".into())).is_err());
     }
     #[test]
+    fn control_c_copies_selected_prompt_while_busy_and_cancels_without_selection() {
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        let (_runtime, mut app, sender) = job_app(None, false);
+        app.focus = crate::app::Focus::Chat;
+        app.bindings = crate::config::Bindings::load("vscode").unwrap();
+        app.compose_insert("revise");
+        app.composer_anchor = Some(0);
+        app.composer_cursor = app.composer.len();
+        app.key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL));
+        assert!(app.busy());
+        assert_eq!(app.clipboard, "revise");
+        app.composer_anchor = None;
+        app.key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL));
+        assert!(!app.busy());
+        assert!(sender.try_send(Event::Text("late".into())).is_err());
+    }
+    #[test]
     fn successful_live_proposal_and_undo() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("draft.md");

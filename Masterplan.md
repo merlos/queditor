@@ -18,6 +18,10 @@ document or command actions. Ratatui renders application state. `Document` owns
 text, grapheme-safe byte offsets, snapshots, saved/disk baselines, and revisions.
 `Config` loads defaulted YAML settings and editor-action bindings. The UI handles
 screen-column calculations independently of document byte offsets.
+Editor/review, composer, and message rendering share source-preserving word-wrap
+row calculations in `app`; editor tabs retain logical-line stops while prompt
+and message tabs use visual-row stops. Words wider than the pane fall back to
+grapheme-safe splitting. Selection and mouse mapping use the same row boundaries.
 
 The implementation uses substantive modules instead of empty placeholder folders.
 It uses `String` plus bounded snapshots rather than a rope; measure large-file
@@ -96,6 +100,10 @@ The same parser handles runtime custom Markdown files appended after the built-i
 
 Composer, slash suggestions, scrollback, agent registry, session reset,
 selection/document snapshots, and local mock edit demonstrations.
+Prompt selection uses grapheme-safe byte offsets with keyboard/mouse editing and
+the editor's shared internal clipboard. Rendered chat rows map back to sanitized
+message source for read-only mouse selection/copy, preserving logical newlines
+and Markdown while excluding headings, activity and model footers.
 The editor/prompt/submitted messages use lighter borderless theme surfaces; the
 prompt identifies agent/model, and response footers use per-message model metadata
 captured at response creation and preserved by optional session persistence.

@@ -126,6 +126,33 @@ class TerminalApp:
 
 
 class SmokeTests(unittest.TestCase):
+    def test_prompt_selection_shares_clipboard_with_editor_without_submitting_paste(self):
+        with tempfile.TemporaryDirectory(prefix="queditor-prompt-clipboard-") as directory:
+            doc, app = self.launch(directory)
+            app.send(b"\tfirst\x0asecond", b"second")
+            # Enhanced Ctrl+Shift+A selects the entire multiline prompt.
+            app.send(b"\x1b[97;6u\x03", b"Copied to Queditor's internal clipboard")
+            app.send(b"\x18\x16\t\x16\x13", b"Saved")
+            app.send(b"\x11")
+            app.finish()
+            self.assertEqual(doc.read_text(), "first\nsecond")
+
+    def test_agent_reply_mouse_selection_copies_into_editor(self):
+        with tempfile.TemporaryDirectory(prefix="queditor-reply-clipboard-") as directory:
+            doc, app = self.launch(directory)
+            app.send(b"\thello\r", b"Mock mode is selected.")
+            body = next((row, "".join(line).index("Planner is selected."))
+                        for row, line in enumerate(app.screen)
+                        if "Planner is selected." in "".join(line))
+            row, column = body
+            # SGR mouse coordinates are one-based; drag over the first word.
+            app.send(f"\x1b[<0;{column + 1};{row + 1}M\x1b[<32;{column + 8};{row + 1}M\x1b[<0;{column + 8};{row + 1}m".encode())
+            app.send(b"\x03", b"Copied to Queditor's internal clipboard")
+            app.send(b"\t\x16\x13", b"Saved")
+            app.send(b"\x11")
+            app.finish()
+            self.assertEqual(doc.read_text(), "Planner")
+
     def test_shift_tab_rotates_agent_mode_pairs_and_restores_saved_pair(self):
         with tempfile.TemporaryDirectory(prefix="queditor-rotation-") as directory:
             root = Path(directory)

@@ -13,6 +13,10 @@ use std::{
 };
 use tokio::sync::{mpsc, oneshot};
 
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(60);
+const STREAM_TIMEOUT: Duration = Duration::from_secs(1800);
+const REQUEST_TIMEOUT: Duration = Duration::from_secs(1800);
+
 pub struct Request {
     pub model: String,
     pub provider: Option<crate::config::Provider>,
@@ -88,7 +92,7 @@ impl RequestUsage {
 }
 
 pub fn client() -> genai::Result<Client> {
-    let web = WebConfig::default().with_connect_timeout(Duration::from_secs(30));
+    let web = WebConfig::default().with_connect_timeout(CONNECT_TIMEOUT);
     let reqwest = reqwest::Client::builder().redirect(reqwest::redirect::Policy::none());
     let reqwest =
         web.apply_to_builder(reqwest)
@@ -122,12 +126,14 @@ pub fn safe_error(error: &genai::Error) -> String {
 }
 
 pub async fn run(request: Request, sender: mpsc::Sender<Event>) {
-    let result =
-        tokio::time::timeout(Duration::from_secs(600), conversation(request, &sender)).await;
+    let result = tokio::time::timeout(REQUEST_TIMEOUT, conversation(request, &sender)).await;
     let error = match result {
         Ok(Ok(())) => return,
         Ok(Err(e)) => e.to_string(),
-        Err(_) => "Agent request timed out after ten minutes (including permission waits)".into(),
+        Err(_) => format!(
+            "Agent request timed out after {} minutes (including permission waits)",
+            REQUEST_TIMEOUT.as_secs() / 60
+        ),
     };
     let _ = sender.send(Event::Failed(error)).await;
 }
@@ -163,8 +169,8 @@ async fn conversation(request: Request, sender: &mpsc::Sender<Event>) -> Result<
         .with_capture_usage(true)
         .with_capture_tool_calls(true)
         .with_capture_reasoning_content(true)
-        .with_stream_header_timeout(Duration::from_secs(120))
-        .with_stream_read_timeout(Duration::from_secs(120));
+        .with_stream_header_timeout(STREAM_TIMEOUT)
+        .with_stream_read_timeout(STREAM_TIMEOUT);
     let mut total = 0;
     let mut tool_count = 0;
     let mut proposed = false;
@@ -343,6 +349,15 @@ fn string_arg<'a>(value: &'a Value, name: &str) -> Result<&'a str> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn live_timeouts_allow_slow_providers_and_permission_waits() {
+        assert_eq!(CONNECT_TIMEOUT, Duration::from_secs(60));
+        assert_eq!(STREAM_TIMEOUT, Duration::from_secs(1800));
+        assert_eq!(REQUEST_TIMEOUT, Duration::from_secs(1800));
+        assert!(CONNECT_TIMEOUT < STREAM_TIMEOUT);
+        assert!(STREAM_TIMEOUT <= REQUEST_TIMEOUT);
+    }
 
     #[test]
     fn usage_sums_tool_rounds_and_uses_output_tokens_over_provider_time() {

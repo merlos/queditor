@@ -1,5 +1,5 @@
 use crate::{
-    app::{App, Focus, Level, Pending, composer_display_width, composer_rows},
+    app::{App, Focus, Level, Pending, composer_display_width, composer_rows, word_wrapped_rows},
     config::AgentMode,
     document::{display_width, grapheme_width},
 };
@@ -26,8 +26,13 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
         app.editor_area = Rect::default();
         app.chat_area = Rect::default();
         frame.render_widget(
-            Paragraph::new("Terminal too small (minimum 30 × 10).\nResize, or Ctrl+Q to exit.")
-                .wrap(ratatui::widgets::Wrap { trim: false }),
+            Paragraph::new(
+                wrapped(
+                    "Terminal too small (minimum 30 × 10).\nResize, or Ctrl+Q to exit.",
+                    usize::from(area.width),
+                )
+                .join("\n"),
+            ),
             area,
         );
         if app.save_prompt.is_some() {
@@ -244,19 +249,20 @@ fn editor(frame: &mut Frame, app: &mut App) {
         let mut spans = vec![];
         let mut display = 0;
         let mut segment_start = 0;
-        let mut segment_width = 0;
         let mut bold = false;
         let mut italic = false;
         let mut inline_code = false;
         let graphemes = text.grapheme_indices(true).collect::<Vec<_>>();
+        let breaks = word_wrapped_rows(text, width, true);
+        let mut breaks = breaks.iter().skip(1).peekable();
         let mut previous_star = false;
         for (n, (byte, g)) in graphemes.iter().enumerate() {
             let w = grapheme_width(g, display);
-            if segment_width > 0 && segment_width + w > width {
+            if breaks.peek().is_some_and(|row| row.start == *byte) {
+                breaks.next();
                 lines.push(Line::from(std::mem::take(&mut spans)));
                 rows.push((index, segment_start));
                 segment_start = display;
-                segment_width = 0;
             }
             if *g == "`" {
                 inline_code = !inline_code;
@@ -305,7 +311,6 @@ fn editor(frame: &mut Frame, app: &mut App) {
             let rendered = if *g == "\t" { " ".repeat(w) } else { safe(g) };
             spans.push(Span::styled(rendered, style));
             display += w;
-            segment_width += w;
         }
         lines.push(Line::from(spans));
         rows.push((index, segment_start));
@@ -629,6 +634,8 @@ fn review_editor(frame: &mut Frame, app: &mut App) {
                 let mut display = 0;
                 let mut segment_start = 0;
                 let mut segment_width = 0;
+                let breaks = word_wrapped_rows(text, width, true);
+                let mut breaks = breaks.iter().skip(1).peekable();
                 let finish = |lines: &mut Vec<Line<'static>>,
                               positions: &mut Vec<Option<(usize, usize)>>,
                               spans: &mut Vec<Span<'static>>,
@@ -643,7 +650,8 @@ fn review_editor(frame: &mut Frame, app: &mut App) {
                 };
                 for (byte, g) in text.grapheme_indices(true) {
                     let w = grapheme_width(g, display);
-                    if segment_width > 0 && segment_width + w > width {
+                    if breaks.peek().is_some_and(|row| row.start == byte) {
+                        breaks.next();
                         finish(
                             &mut lines,
                             &mut positions,
@@ -713,9 +721,17 @@ fn review_editor(frame: &mut Frame, app: &mut App) {
     if lines.is_empty() {
         // All changes manually protected: keep the live document editable.
         for (row, raw) in new.split('\n').enumerate() {
-            for (segment, text) in wrapped(raw, width).into_iter().enumerate() {
+            for segment in word_wrapped_rows(raw, width, true) {
+                let start = display_width(&raw[..segment.start]);
+                let text = crop(
+                    raw,
+                    start,
+                    display_width(&raw[..segment.end])
+                        .saturating_sub(start)
+                        .min(width),
+                );
                 lines.push(Line::from(format!("{}{}", " ".repeat(gutter), text)));
-                positions.push(Some((row, segment * width)));
+                positions.push(Some((row, start)));
                 row_hunks.push(None);
             }
         }
@@ -827,15 +843,21 @@ fn chat(frame: &mut Frame, app: &mut App) {
     ])
     .split(inside);
     let width = usize::from(areas[0].width).max(1);
-    let lines = chat_lines(app, width);
+    let (lines, positions) = chat_render_lines(app, width);
     let max_scroll = lines.len().saturating_sub(usize::from(areas[0].height));
     if app.follow_chat {
         app.chat_scroll = max_scroll;
     }
     app.chat_scroll = app.chat_scroll.min(max_scroll);
     if app.chat_scroll == max_scroll {
-        app.follow_chat = true;
+        app.follow_chat = app.message_selection.is_none();
     }
+    app.chat_history_area = areas[0];
+    app.chat_view_rows = positions
+        .into_iter()
+        .skip(app.chat_scroll)
+        .take(usize::from(areas[0].height))
+        .collect();
     frame.render_widget(
         Paragraph::new(lines.into_iter().skip(app.chat_scroll).collect::<Vec<_>>()),
         areas[0],
@@ -911,19 +933,42 @@ fn chat(frame: &mut Frame, app: &mut App) {
     let cursor_col =
         composer_display_width(&app.composer[rows[cursor_row].start..app.composer_cursor]);
     let vertical = cursor_row.saturating_sub(usize::from(input_area.height).saturating_sub(1));
+    app.composer_view_rows = rows
+        .iter()
+        .copied()
+        .skip(vertical)
+        .take(usize::from(input_area.height))
+        .collect();
+    let selection = app.composer_selection();
     let input_lines = rows
         .iter()
         .skip(vertical)
         .map(|row| {
-            Line::from(
-                wrapped(
-                    &app.composer[row.start..row.end],
-                    usize::from(input_area.width),
-                )
-                .into_iter()
-                .next()
-                .unwrap_or_default(),
-            )
+            let mut column = 0;
+            let spans = app.composer[row.start..row.end]
+                .grapheme_indices(true)
+                .map(|(byte, grapheme)| {
+                    let width = grapheme_width(grapheme, column);
+                    column += width;
+                    let style = if selection
+                        .as_ref()
+                        .is_some_and(|range| range.contains(&(row.start + byte)))
+                    {
+                        Style::default().bg(app.theme.selection)
+                    } else {
+                        Style::default().bg(app.theme.surface)
+                    };
+                    Span::styled(
+                        if grapheme == "\t" {
+                            " ".repeat(width.min(usize::from(input_area.width)))
+                        } else {
+                            safe(grapheme)
+                        },
+                        style,
+                    )
+                })
+                .collect::<Vec<_>>();
+            Line::from(spans)
         })
         .collect::<Vec<_>>();
     frame.render_widget(Paragraph::new(input_lines), input_area);
@@ -1051,6 +1096,8 @@ fn markdown_reply_lines(text: &str, width: usize, app: &App) -> Vec<Line<'static
     for raw in text.split('\n') {
         let mut spans = vec![];
         let mut column = 0;
+        let breaks = composer_rows(raw, width);
+        let mut breaks = breaks.iter().skip(1).peekable();
         for (byte, grapheme) in raw.grapheme_indices(true) {
             let position = offset + byte;
             while highlights
@@ -1064,14 +1111,17 @@ fn markdown_reply_lines(text: &str, width: usize, app: &App) -> Vec<Line<'static
                 .iter()
                 .fold(base, |style, (_, overlay)| style.patch(*overlay));
             let mut w = grapheme_width(grapheme, column);
-            if column > 0 && column + w > width {
+            if breaks.peek().is_some_and(|row| row.start == byte) {
+                breaks.next();
                 lines.push(Line::from(std::mem::take(&mut spans)));
                 column = 0;
                 w = grapheme_width(grapheme, 0);
             }
             spans.push(Span::styled(
                 if grapheme == "\t" {
-                    " ".repeat(w.min(width))
+                    " ".repeat(w.min(width.saturating_sub(column)))
+                } else if grapheme.chars().all(char::is_whitespace) && column + w > width {
+                    String::new()
                 } else {
                     grapheme.into()
                 },
@@ -1085,8 +1135,17 @@ fn markdown_reply_lines(text: &str, width: usize, app: &App) -> Vec<Line<'static
     lines
 }
 
+#[cfg(test)]
 fn chat_lines(app: &App, width: usize) -> Vec<Line<'static>> {
+    chat_render_lines(app, width).0
+}
+
+fn chat_render_lines(
+    app: &App,
+    width: usize,
+) -> (Vec<Line<'static>>, Vec<Option<crate::app::ChatRow>>) {
     let mut lines = vec![];
+    let mut positions = vec![];
     for (index, message) in app.messages.iter().enumerate() {
         let submitted = message.role == "you";
         let background = if submitted {
@@ -1157,6 +1216,7 @@ fn chat_lines(app: &App, width: usize) -> Vec<Line<'static>> {
                     }),
             );
         }
+        let body_start = lines.len();
         if matches!(message.role.as_str(), "assistant" | "mock") {
             lines.extend(markdown_reply_lines(&message.text, content_width, app));
         } else {
@@ -1170,6 +1230,24 @@ fn chat_lines(app: &App, width: usize) -> Vec<Line<'static>> {
                         )
                     }),
             );
+        }
+        positions.resize(body_start, None);
+        let text = safe(&message.text);
+        let rows = composer_rows(&text, content_width);
+        for (line, row) in lines[body_start..].iter_mut().zip(rows) {
+            let left = usize::from(submitted);
+            if let Some(selection) = &app.message_selection
+                && selection.message == index
+            {
+                let range =
+                    selection.anchor.min(selection.cursor)..selection.anchor.max(selection.cursor);
+                highlight_chat_selection(line, &text, row, left, &range, app.theme.selection);
+            }
+            positions.push(Some(crate::app::ChatRow {
+                message: index,
+                row,
+                left,
+            }));
         }
         if matches!(message.role.as_str(), "assistant" | "mock")
             && app.active_message_index() != Some(index)
@@ -1203,7 +1281,50 @@ fn chat_lines(app: &App, width: usize) -> Vec<Line<'static>> {
         }
         lines.push(Line::from(""));
     }
-    lines
+    positions.resize(lines.len(), None);
+    (lines, positions)
+}
+
+fn highlight_chat_selection(
+    line: &mut Line<'static>,
+    text: &str,
+    row: crate::app::ComposerRow,
+    left: usize,
+    selection: &Range<usize>,
+    color: Color,
+) {
+    let mut columns = vec![];
+    let mut column = left;
+    for (byte, grapheme) in text[row.start..row.end].grapheme_indices(true) {
+        let width = grapheme_width(grapheme, column - left);
+        if selection.contains(&(row.start + byte)) {
+            columns.push(column..column + width);
+        }
+        column += width;
+    }
+    let mut column = 0;
+    line.spans = line
+        .spans
+        .iter()
+        .flat_map(|span| {
+            span.content
+                .graphemes(true)
+                .map(|grapheme| {
+                    let width = display_width(grapheme);
+                    let selected = columns.iter().any(|range| range.contains(&column));
+                    column += width;
+                    Span::styled(
+                        grapheme.to_owned(),
+                        if selected {
+                            span.style.bg(color)
+                        } else {
+                            span.style
+                        },
+                    )
+                })
+                .collect::<Vec<_>>()
+        })
+        .collect();
 }
 
 fn explorer(frame: &mut Frame, app: &mut App) {
@@ -1308,8 +1429,7 @@ fn save_prompt(frame: &mut Frame, app: &App) {
     }
     if let Some(error) = &prompt.error {
         frame.render_widget(
-            Paragraph::new(safe(error))
-                .wrap(ratatui::widgets::Wrap { trim: false })
+            Paragraph::new(wrapped(error, usize::from(areas[2].width)).join("\n"))
                 .style(Style::default().fg(app.theme.red)),
             areas[2],
         );
@@ -1655,10 +1775,11 @@ fn connect(frame: &mut Frame, app: &mut App) {
     };
     frame.render_widget(Clear, popup);
     frame.render_widget(
-        Paragraph::new(instructions)
-            .wrap(ratatui::widgets::Wrap { trim: false })
-            .block(Block::default().borders(Borders::ALL).title(title))
-            .style(Style::default().bg(app.theme.bg).fg(app.theme.fg)),
+        Paragraph::new(
+            wrapped(instructions, usize::from(popup.width.saturating_sub(2))).join("\n"),
+        )
+        .block(Block::default().borders(Borders::ALL).title(title))
+        .style(Style::default().bg(app.theme.bg).fg(app.theme.fg)),
         popup,
     );
     if matches!(wizard.step, ConnectStep::PlaintextConfirm) {
@@ -1972,15 +2093,7 @@ fn popup_option<'a>(selected: bool, key: &'a str, label: &'a str, app: &App) -> 
 }
 
 fn safe(text: &str) -> String {
-    text.chars()
-        .map(|c| {
-            if c.is_control() && c != '\n' && c != '\t' {
-                '�'
-            } else {
-                c
-            }
-        })
-        .collect()
+    crate::app::display_text(text)
 }
 fn crop(text: &str, start: usize, width: usize) -> String {
     let mut out = String::new();
@@ -2001,28 +2114,11 @@ fn crop(text: &str, start: usize, width: usize) -> String {
 }
 fn wrapped(text: &str, width: usize) -> Vec<String> {
     let width = width.max(1);
-    let mut result = vec![];
-    for line in safe(text).split('\n') {
-        let mut current = String::new();
-        let mut col = 0;
-        for g in line.graphemes(true) {
-            let mut w = grapheme_width(g, col);
-            if col + w > width && col > 0 {
-                result.push(current);
-                current = String::new();
-                col = 0;
-                w = grapheme_width(g, 0);
-            }
-            if g == "\t" {
-                current.push_str(&" ".repeat(w.min(width)));
-            } else {
-                current.push_str(g);
-            }
-            col += w;
-        }
-        result.push(current);
-    }
-    result
+    let text = safe(text);
+    composer_rows(&text, width)
+        .into_iter()
+        .map(|row| crop(&text[row.start..row.end], 0, width))
+        .collect()
 }
 
 #[cfg(test)]
@@ -2048,6 +2144,207 @@ mod tests {
             row: y,
             modifiers: crossterm::event::KeyModifiers::NONE,
         });
+    }
+
+    #[test]
+    fn word_wrapping_preserves_words_whitespace_and_unicode_source() {
+        for (source, width, expected) in [
+            ("hello world again", 8, vec!["hello ", "world ", "again"]),
+            ("hello world", 5, vec!["hello ", "world"]),
+            ("a 界界 e\u{301}👩‍💻", 5, vec!["a ", "界界 ", "e\u{301}👩‍💻"]),
+            ("abcdefghij", 4, vec!["abcd", "efgh", "ij"]),
+            ("one\n\nlast\n", 4, vec!["one", "", "last", ""]),
+        ] {
+            let rows = composer_rows(source, width);
+            let actual = rows
+                .iter()
+                .map(|row| &source[row.start..row.end])
+                .collect::<Vec<_>>();
+            assert_eq!(actual, expected);
+            assert_eq!(
+                wrapped(source, width),
+                expected
+                    .iter()
+                    .map(|row| crop(row, 0, width))
+                    .collect::<Vec<_>>()
+            );
+            for row in rows {
+                assert!(source.is_char_boundary(row.start) && source.is_char_boundary(row.end));
+            }
+        }
+        let source = "hello\tworld";
+        assert_eq!(wrapped(source, 8), vec!["hello   ", "world"]);
+    }
+
+    #[test]
+    fn markdown_word_wrap_rows_match_selection_offsets_and_keep_styles() {
+        let mut app = App::new(None).unwrap();
+        app.messages.clear();
+        let source = "one **bold word** next 界界";
+        app.message("assistant", source);
+        let (lines, positions) = chat_render_lines(&app, 12);
+        let rows = composer_rows(source, 12);
+        let body = lines
+            .iter()
+            .zip(positions)
+            .filter_map(|(line, position)| position.map(|position| (line, position.row)))
+            .collect::<Vec<_>>();
+        assert_eq!(body.len(), rows.len());
+        for ((line, row), expected) in body.iter().zip(rows) {
+            assert_eq!(row.start, expected.start);
+            assert_eq!(row.end, expected.end);
+            assert_eq!(line.to_string(), source[row.start..row.end]);
+        }
+        assert!(body.iter().flat_map(|(line, _)| &line.spans).any(|span| {
+            span.content.contains('w') && span.style.add_modifier.contains(Modifier::BOLD)
+        }));
+    }
+
+    #[test]
+    fn editor_and_review_word_wrap_mouse_positions_use_actual_row_starts() {
+        for review in [false, true] {
+            let (_dir, mut app) = review_fixture("old\n", "new\n");
+            let mut terminal = Terminal::new(TestBackend::new(80, 40)).unwrap();
+            if !review {
+                app.review = None;
+            }
+            terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+            let width =
+                usize::from(app.editor_area.width) - if review { app.review_gutter } else { 0 };
+            let prefix = "a".repeat(width - 5);
+            let text = format!("{prefix} wholeword tail");
+            app.document.text = text.clone();
+            app.document.cursor = 0;
+            if review {
+                app.review = Some(crate::review::Review::new("old".into(), text.clone()));
+            }
+            terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+            let start = prefix.len() + 1;
+            let visual = if review {
+                app.review_view_rows
+                    .iter()
+                    .position(|row| *row == Some((0, start)))
+            } else {
+                app.editor_view_rows
+                    .iter()
+                    .position(|row| *row == (0, start))
+            }
+            .expect("the whole word moves to the next visual row");
+            let area = app.editor_area;
+            let gutter = app.review_gutter as u16;
+            click(&mut app, area.x + gutter, area.y + visual as u16);
+            assert_eq!(app.document.cursor, start);
+            assert_eq!(app.document.text, text);
+        }
+    }
+
+    #[test]
+    fn reply_mouse_selection_copies_source_across_wraps_without_mutating_messages() {
+        use crossterm::event::{
+            KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
+        };
+        for (width, height) in [(140, 35), (60, 30)] {
+            let mut app = App::new(None).unwrap();
+            app.messages.clear();
+            let source = format!("**界e\u{301}**\t{}\nlast 👩‍💻", "words ".repeat(10));
+            app.message("assistant", &source);
+            let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+            terminal.draw(|f| draw(f, &mut app)).unwrap();
+            let start = app
+                .chat_view_rows
+                .iter()
+                .position(|row| row.is_some())
+                .unwrap();
+            let end = app
+                .chat_view_rows
+                .iter()
+                .rposition(|row| row.is_some())
+                .unwrap();
+            let area = app.chat_history_area;
+            click(&mut app, area.x, area.y + start as u16);
+            app.mouse(MouseEvent {
+                kind: MouseEventKind::Drag(MouseButton::Left),
+                column: area.right() - 1,
+                row: area.y + end as u16,
+                modifiers: KeyModifiers::NONE,
+            });
+            app.mouse(MouseEvent {
+                kind: MouseEventKind::Up(MouseButton::Left),
+                column: area.right() - 1,
+                row: area.y + end as u16,
+                modifiers: KeyModifiers::NONE,
+            });
+            terminal.draw(|f| draw(f, &mut app)).unwrap();
+            assert_eq!(
+                terminal.backend().buffer()[(area.x, area.y + start as u16)].bg,
+                app.theme.selection
+            );
+            app.key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL));
+            assert_eq!(app.clipboard, source);
+            app.key(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::CONTROL));
+            assert_eq!(app.messages[0].text, source);
+            app.key(KeyEvent::new(KeyCode::Char('v'), KeyModifiers::CONTROL));
+            assert_eq!(app.composer, source);
+            assert!(app.message_selection.is_none());
+            assert!(app.document.text.is_empty());
+        }
+    }
+
+    #[test]
+    fn prompt_mouse_positions_and_selection_account_for_tabs_and_wide_graphemes() {
+        use crossterm::event::{
+            KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
+        };
+        let mut app = App::new(None).unwrap();
+        app.compose_insert("界\te\u{301}👩‍💻 tail");
+        let mut terminal = Terminal::new(TestBackend::new(140, 30)).unwrap();
+        terminal.draw(|f| draw(f, &mut app)).unwrap();
+        let area = app.composer_area;
+        click(&mut app, area.x + 1, area.y);
+        assert_eq!(app.composer_cursor, 0);
+        app.mouse(MouseEvent {
+            kind: MouseEventKind::Drag(MouseButton::Left),
+            column: area.x + 7,
+            row: area.y,
+            modifiers: KeyModifiers::NONE,
+        });
+        terminal.draw(|f| draw(f, &mut app)).unwrap();
+        app.key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL));
+        assert_eq!(app.clipboard, "界\te\u{301}👩‍💻");
+        assert_eq!(
+            terminal.backend().buffer()[(area.x + 4, area.y)].bg,
+            app.theme.selection
+        );
+        app.paste("replacement");
+        assert_eq!(app.composer, "replacement tail");
+    }
+
+    #[test]
+    fn reply_selection_ignores_headers_and_copies_sanitized_controls() {
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        let mut app = App::new(None).unwrap();
+        app.messages.clear();
+        app.message("assistant", "\u{1b}[31m界");
+        let mut terminal = Terminal::new(TestBackend::new(140, 30)).unwrap();
+        terminal.draw(|f| draw(f, &mut app)).unwrap();
+        let area = app.chat_history_area;
+        click(&mut app, area.x, area.y);
+        assert!(app.message_selection.is_none());
+        let row = app
+            .chat_view_rows
+            .iter()
+            .position(|row| row.is_some())
+            .unwrap();
+        click(&mut app, area.x, area.y + row as u16);
+        app.key(KeyEvent::new(
+            KeyCode::Char('a'),
+            KeyModifiers::CONTROL | KeyModifiers::SHIFT,
+        ));
+        app.key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL));
+        assert_eq!(app.clipboard, "�[31m界");
+        app.command("/new").unwrap();
+        assert!(app.message_selection.is_none());
+        assert!(app.chat_view_rows.is_empty());
     }
 
     #[test]

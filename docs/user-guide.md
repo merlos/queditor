@@ -8,11 +8,29 @@ line boundaries, Ctrl+Home/End to document boundaries, and PageUp/Down by ten li
 Ctrl+A/E moves to the beginning/end of the current line. Ctrl+K deletes from the
 cursor to the end of that line without deleting the newline; the deletion is undoable.
 Click to position the cursor, drag to select, and use the wheel to scroll.
-Long lines soft-wrap to the editor width without changing the document. Cursor
-movement and mouse positioning continue to use the underlying logical line.
+Long lines soft-wrap at word boundaries without changing the document. Words
+that fit stay together on the current or next visual line; only words wider than
+the available space split at grapheme boundaries. The same rule applies to the
+prompt, chat messages (including Markdown replies), and wrapping interface text
+such as statistics, activity, model footers, errors, and wizard instructions.
+Cursor movement and mouse positioning continue to use the underlying logical
+line. Original spaces, tabs, and newlines remain intact when editing or copying;
+trailing whitespace beyond a visual row's width is not drawn.
 
 Copy/cut/paste editing shortcuts use a local internal clipboard. Terminal paste
 is also supported through bracketed paste. Pasted newlines never submit chat.
+The clipboard is shared by the editor and agent prompt. In the prompt, select with
+Shift+arrows or mouse dragging; typing or pasting replaces selected text.
+With the default profile, Ctrl+C copies, Ctrl+X cuts, and Ctrl+V pastes.
+The Emacs profile uses Alt+W, Ctrl+W, and Ctrl+Y respectively.
+Drag text within a chat message (including agent replies) to select it, then copy
+with your profile's shortcut or Ctrl+Shift+C. Messages are read-only; cut never
+deletes a reply, and paste always inserts into the prompt. Copied replies retain
+Markdown source, tabs, and original line breaks, not display wrapping; unsafe
+terminal controls are replaced with visible replacement characters.
+Ctrl+Shift+A selects the whole prompt, or the whole message after clicking its text.
+Ctrl+A still moves to the prompt line start. These shortcuts use the internal
+clipboard, not the system clipboard.
 Undo/redo follows the selected editing profile; `/keys` shows the actual bindings.
 Terminal paste also works in `/connect` text and API-key fields. API keys remain
 masked; surrounding whitespace and pasted line breaks are discarded.
@@ -124,7 +142,10 @@ Ctrl+A and Ctrl+E move to the start and end of the current logical prompt line.
 Ctrl+K deletes from the cursor to that line's end, preserving its newline and the
 following lines. These shortcuts work in both editing profiles and in the editor;
 soft wrapping does not change which logical line they operate on.
-Escape clears unsent input. PageUp/PageDown or the wheel scroll chat. Scrolling
+Escape clears a prompt/message selection first, otherwise clears unsent input
+(while an agent is running, Escape always cancels it). Ctrl+C copies selected text
+while running; without a selection it cancels. Shift+Up/Down selects prompt text
+without recalling history. PageUp/PageDown or the wheel scroll chat. Scrolling
 away from the bottom stops auto-follow until you return to the bottom.
 Shift+Tab cycles agent/mode pairs from either pane without changing focus. With
 only Planner and Blogger, the cycle is Blogger Chat → Blogger Agent → Planner
