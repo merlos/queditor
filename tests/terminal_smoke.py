@@ -23,7 +23,7 @@ BINARY = ROOT / "target" / "debug" / "queditor"
 
 
 class TerminalApp:
-    def __init__(self, document, config, width=140, height=40, extra_env=None, backend=b"mock"):
+    def __init__(self, document, config, width=140, height=40, extra_env=None, backend=b"mock", start_in_editor=True):
         self.master, self.slave = pty.openpty()
         fcntl.ioctl(self.slave, termios.TIOCSWINSZ, struct.pack("HHHH", height, width, 0, 0))
         self.original_attrs = termios.tcgetattr(self.slave)
@@ -47,6 +47,10 @@ class TerminalApp:
         self.wait_for(backend)
         if b"\x1b[>1u" not in self.output:
             raise AssertionError("Editor did not enable enhanced keyboard reporting")
+        # Most legacy workflows begin by editing a document. Startup itself now
+        # focuses the agent panel; keep those tests explicit about their setup.
+        if start_in_editor:
+            os.write(self.master, b"\t")
 
     def feed(self, data):
         """Minimal VT cursor/screen tracking: Ratatui emits diffs, not full text lines."""
@@ -126,6 +130,19 @@ class TerminalApp:
 
 
 class SmokeTests(unittest.TestCase):
+    def test_pristine_startup_focuses_planner_in_agent_mode(self):
+        with tempfile.TemporaryDirectory(prefix="queditor-pristine-") as directory:
+            root = Path(directory)
+            doc = root / "draft.md"
+            doc.write_text("")
+            app = TerminalApp(doc, root / "config", start_in_editor=False)
+            self.addCleanup(app.close)
+            visible = " ".join(" ".join("".join(row) for row in app.screen).split())
+            self.assertIn("Planner Agent · mock", visible)
+            app.send(b"/mode chat\r", b"CHAT mode selected")
+            app.send(b"\x11")
+            app.finish()
+
     def test_prompt_selection_shares_clipboard_with_editor_without_submitting_paste(self):
         with tempfile.TemporaryDirectory(prefix="queditor-prompt-clipboard-") as directory:
             doc, app = self.launch(directory)
@@ -383,7 +400,9 @@ class LiveSmokeTests(unittest.TestCase):
             doc.write_text("unchanged")
             config = root / "config"
             (config / "queditor").mkdir(parents=True)
-            (config / "queditor/config.yaml").write_text("model: genai_1::test\n")
+            (config / "queditor/config.yaml").write_text(
+                "model: genai_1::test\nagent_modes:\n  Planner: chat\n"
+            )
             # Reserved .example domain: denied browsing must never resolve/fetch it.
             url = "https://permission-test.example/page?q=rust"
             provider = FakeProvider(url, deny=True, operation="webfetch")
@@ -411,7 +430,9 @@ class LiveSmokeTests(unittest.TestCase):
             note.write_text("approved tool context")
             config = root / "config"
             (config / "queditor").mkdir(parents=True)
-            (config / "queditor/config.yaml").write_text("model: genai_1::test\n")
+            (config / "queditor/config.yaml").write_text(
+                "model: genai_1::test\nagent_modes:\n  Planner: chat\n"
+            )
             provider = FakeProvider(note)
             self.addCleanup(provider.close)
             app = TerminalApp(None, config, extra_env={"GENAI_1_ENDPOINT": provider.endpoint, "GENAI_1_API_KEY": "local-test-placeholder"}, backend=b"genai_1::test")
@@ -440,7 +461,9 @@ class LiveSmokeTests(unittest.TestCase):
             doc.write_text("one\ntwo\nthree")
             config = root / "config"
             (config / "queditor").mkdir(parents=True)
-            (config / "queditor/config.yaml").write_text("model: genai_1::test\n")
+            (config / "queditor/config.yaml").write_text(
+                "model: genai_1::test\nagent_modes:\n  Planner: chat\n"
+            )
             provider = FakeProvider(root / "unused", deny=True)
             self.addCleanup(provider.close)
             app = TerminalApp(
@@ -485,6 +508,7 @@ class LiveSmokeTests(unittest.TestCase):
             self.assertIn("base_url: " + provider.endpoint, saved)
             self.assertIn("env: COMPANY_API_KEY", saved)
             self.assertNotIn("local-test-key", saved)
+            app.send(b"/mode chat\r", b"CHAT mode selected")
             app.send(b"hello\r", b"Agent finished")
             self.assertEqual(len(provider.requests), 3)
             self.assertEqual(
