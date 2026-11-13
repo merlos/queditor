@@ -146,7 +146,7 @@ pub fn definitions() -> Vec<Tool> {
 pub fn safe_error(error: &genai::Error) -> String {
     match error {
         genai::Error::HttpError { status, .. } => format!("Provider returned HTTP {status}; check credentials, model access, and rate limits"),
-        genai::Error::RequiresApiKey { .. } | genai::Error::NoAuthData { .. } | genai::Error::Resolver { .. } => "Provider authentication/resolution failed; check its configured environment, keyring, or private-file credential".into(),
+        genai::Error::RequiresApiKey { .. } | genai::Error::NoAuthData { .. } | genai::Error::Resolver { .. } => "Provider authentication/resolution failed; check its configured environment or private-file credential".into(),
         _ => "Provider request/stream failed; check model, endpoint, credentials, and network. Sensitive provider diagnostics are suppressed.".into(),
     }
 }

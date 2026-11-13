@@ -285,11 +285,7 @@ pub const CONNECT_PROVIDER_NAMES: [&str; 5] = [
     "OpenRouter",
     "Custom OpenAI-compatible",
 ];
-pub const CONNECT_CREDENTIAL_NAMES: [&str; 3] = [
-    "OS keyring (recommended)",
-    "Environment variable",
-    "Private plaintext file",
-];
+pub const CONNECT_CREDENTIAL_NAMES: [&str; 2] = ["Environment variable", "Private plaintext file"];
 
 impl Drop for ConnectWizard {
     fn drop(&mut self) {
@@ -306,7 +302,6 @@ pub enum ConnectStep {
     Endpoint,
     Credential,
     Env,
-    SecretKeyring,
     SecretFile,
     PlaintextConfirm,
 }
@@ -315,6 +310,7 @@ pub struct ModelPicker {
     pub models: Vec<String>,
     pub selected: usize,
     pub scroll: usize,
+    pub refreshing: bool,
 }
 
 pub struct RecoveryPicker {
@@ -1034,7 +1030,7 @@ impl App {
             return;
         };
         let target = match wizard.step {
-            ConnectStep::SecretKeyring | ConnectStep::SecretFile => &mut wizard.secret,
+            ConnectStep::SecretFile => &mut wizard.secret,
             ConnectStep::Id | ConnectStep::Name | ConnectStep::Endpoint | ConnectStep::Env => {
                 &mut wizard.input
             }
@@ -1398,6 +1394,22 @@ impl App {
     }
 
     pub fn open_model_picker(&mut self) {
+        let models = self.model_choices();
+        self.model_picker = Some(ModelPicker {
+            models,
+            selected: 0,
+            scroll: 0,
+            refreshing: false,
+        });
+        if let Err(error) = self.refresh_provider_models() {
+            self.notify(
+                Level::Warning,
+                format!("Could not refresh provider models: {error:#}"),
+            );
+        }
+    }
+
+    fn model_choices(&self) -> Vec<String> {
         let mut models = vec!["mock".to_owned()];
         models.extend(self.config.models.iter().filter(|m| *m != "mock").cloned());
         for (id, provider) in &self.config.providers {
@@ -1408,10 +1420,24 @@ impl App {
         if let Some(index) = models.iter().position(|model| model == &self.config.model) {
             models.swap(0, index);
         }
+        models
+    }
+
+    pub(crate) fn refresh_open_model_picker(&mut self) {
+        let Some(picker) = self.model_picker.as_ref() else {
+            return;
+        };
+        let selected = picker.models.get(picker.selected).cloned();
+        let previous_index = picker.selected;
+        let models = self.model_choices();
+        let selected = selected
+            .and_then(|selected| models.iter().position(|model| model == &selected))
+            .unwrap_or_else(|| previous_index.min(models.len().saturating_sub(1)));
         self.model_picker = Some(ModelPicker {
             models,
-            selected: 0,
+            selected,
             scroll: 0,
+            refreshing: false,
         });
     }
 
@@ -1628,9 +1654,8 @@ impl App {
                         (wizard.credential_selected + 1).min(CONNECT_CREDENTIAL_NAMES.len() - 1)
                 }
                 KeyCode::Enter => self.select_connect_credential(),
-                KeyCode::Char('k') => self.select_connect_credential_at(0),
-                KeyCode::Char('e') => self.select_connect_credential_at(1),
-                KeyCode::Char('f') => self.select_connect_credential_at(2),
+                KeyCode::Char('e') => self.select_connect_credential_at(0),
+                KeyCode::Char('f') => self.select_connect_credential_at(1),
                 _ => {}
             },
             ConnectStep::PlaintextConfirm => match key.code {
@@ -1644,10 +1669,7 @@ impl App {
             },
             _ => match key.code {
                 KeyCode::Backspace => {
-                    let target = if matches!(
-                        wizard.step,
-                        ConnectStep::SecretKeyring | ConnectStep::SecretFile
-                    ) {
+                    let target = if matches!(wizard.step, ConnectStep::SecretFile) {
                         &mut wizard.secret
                     } else {
                         &mut wizard.input
@@ -1660,10 +1682,7 @@ impl App {
                         .modifiers
                         .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) =>
                 {
-                    let target = if matches!(
-                        wizard.step,
-                        ConnectStep::SecretKeyring | ConnectStep::SecretFile
-                    ) {
+                    let target = if matches!(wizard.step, ConnectStep::SecretFile) {
                         &mut wizard.secret
                     } else {
                         &mut wizard.input
@@ -1739,8 +1758,7 @@ impl App {
         };
         wizard.credential_selected = selected.min(CONNECT_CREDENTIAL_NAMES.len() - 1);
         wizard.step = match wizard.credential_selected {
-            0 => ConnectStep::SecretKeyring,
-            1 => ConnectStep::Env,
+            0 => ConnectStep::Env,
             _ => {
                 self.popup_selected = 0;
                 ConnectStep::PlaintextConfirm
@@ -1794,7 +1812,7 @@ impl App {
                     wizard.credential.env = Some(env.into());
                     return Ok(true);
                 }
-                ConnectStep::SecretKeyring | ConnectStep::SecretFile => {
+                ConnectStep::SecretFile => {
                     if wizard.secret.is_empty() {
                         bail!("API key cannot be empty");
                     }
@@ -1818,18 +1836,10 @@ impl App {
             if self.config.providers.contains_key(&id) {
                 bail!("Provider {id} already exists; use /connect delete {id} first");
             }
-            if matches!(
-                wizard.step,
-                ConnectStep::SecretKeyring | ConnectStep::SecretFile
-            ) {
+            if matches!(wizard.step, ConnectStep::SecretFile) {
                 let secret = secrecy::SecretString::from(std::mem::take(&mut wizard.secret));
-                if matches!(wizard.step, ConnectStep::SecretKeyring) {
-                    crate::credentials::save_keyring(&id, &secret)?;
-                    wizard.credential.keyring = Some(id.clone());
-                } else {
-                    crate::credentials::save_file(&id, &secret)?;
-                    wizard.credential.file = Some(id.clone());
-                }
+                crate::credentials::save_file(&id, &secret)?;
+                wizard.credential.file = Some(id.clone());
             }
             let provider = Provider {
                 name: std::mem::take(&mut wizard.name),
@@ -3761,7 +3771,8 @@ mod tests {
         let before = a.messages.len();
         a.command("/connect").unwrap();
         a.key(KeyEvent::new(KeyCode::Char('o'), KeyModifiers::NONE));
-        a.key(KeyEvent::new(KeyCode::Char('k'), KeyModifiers::NONE));
+        a.key(KeyEvent::new(KeyCode::Char('f'), KeyModifiers::NONE));
+        a.key(KeyEvent::new(KeyCode::Char('y'), KeyModifiers::NONE));
         a.paste("  secret-key\r\n");
 
         let wizard = a.connect.as_ref().unwrap();
@@ -3796,7 +3807,6 @@ mod tests {
         let mut a = app();
         a.command("/connect").unwrap();
         a.select_connect_provider_at(0);
-        a.key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
         a.key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
         assert!(matches!(a.connect.as_ref().unwrap().step, ConnectStep::Env));
 
@@ -3805,7 +3815,7 @@ mod tests {
         a.mouse(MouseEvent {
             kind: MouseEventKind::Down(MouseButton::Left),
             column: 12,
-            row: 7,
+            row: 6,
             modifiers: KeyModifiers::NONE,
         });
         assert!(matches!(
@@ -3861,7 +3871,7 @@ mod tests {
         let mut a = app();
         a.command("/connect").unwrap();
         a.select_connect_provider_at(0);
-        a.select_connect_credential_at(2);
+        a.select_connect_credential_at(1);
         a.key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
         a.key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
         assert!(matches!(
@@ -3869,7 +3879,7 @@ mod tests {
             ConnectStep::Credential
         ));
 
-        a.select_connect_credential_at(2);
+        a.select_connect_credential_at(1);
         a.popup_choice_area = Rect::new(10, 5, 40, 2);
         a.mouse(MouseEvent {
             kind: MouseEventKind::Down(MouseButton::Left),
@@ -3903,5 +3913,42 @@ mod tests {
         });
         assert_eq!(a.config.model, expected);
         assert!(a.model_picker.is_none());
+    }
+
+    #[test]
+    fn open_model_picker_reconciles_refreshed_provider_cache() {
+        let mut a = app();
+        a.config.providers.insert(
+            "provider".into(),
+            Provider {
+                name: "Provider".into(),
+                protocol: "openai_compatible".into(),
+                base_url: "https://example.com/v1/".into(),
+                credential: Credential::default(),
+                models: vec!["kept".into(), "removed".into()],
+            },
+        );
+        a.open_model_picker();
+        let picker = a.model_picker.as_mut().unwrap();
+        picker.selected = picker
+            .models
+            .iter()
+            .position(|model| model == "provider::kept")
+            .unwrap();
+
+        a.config.providers.get_mut("provider").unwrap().models =
+            vec!["added".into(), "kept".into()];
+        a.refresh_open_model_picker();
+
+        let picker = a.model_picker.as_ref().unwrap();
+        assert!(picker.models.iter().any(|model| model == "provider::added"));
+        assert!(
+            !picker
+                .models
+                .iter()
+                .any(|model| model == "provider::removed")
+        );
+        assert_eq!(picker.models[picker.selected], "provider::kept");
+        assert!(!picker.refreshing);
     }
 }

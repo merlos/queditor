@@ -28,8 +28,15 @@ pub struct Live {
     pub usage: backend::RequestUsage,
 }
 pub struct Discovery {
-    receiver: oneshot::Receiver<Result<Vec<String>, String>>,
-    provider_id: String,
+    receiver: oneshot::Receiver<DiscoveryResults>,
+    purpose: DiscoveryPurpose,
+}
+type DiscoveryResult = (String, Result<Vec<String>, String>);
+type DiscoveryResults = Vec<DiscoveryResult>;
+#[derive(Clone)]
+enum DiscoveryPurpose {
+    Connect(String),
+    Picker,
 }
 pub struct Job {
     receiver: mpsc::Receiver<Event>,
@@ -354,6 +361,7 @@ impl App {
             .cloned()
             .context("Unknown provider")?;
         let (sender, receiver) = oneshot::channel();
+        let discovered_provider_id = provider_id.clone();
         runtime.spawn(async move {
             let result = match backend::client() {
                 Ok(client) => crate::provider::discover(&client, &provider)
@@ -364,13 +372,68 @@ impl App {
                     }),
                 Err(_) => Err("Could not initialize provider client".into()),
             };
-            let _ = sender.send(result);
+            let _ = sender.send(vec![(discovered_provider_id, result)]);
         });
         self.live.discovery = Some(Discovery {
             receiver,
-            provider_id,
+            purpose: DiscoveryPurpose::Connect(provider_id),
         });
         self.notify(Level::Info, "Discovering provider models…");
+        Ok(())
+    }
+
+    pub fn refresh_provider_models(&mut self) -> Result<()> {
+        if self.live.discovery.is_some() || self.config.providers.is_empty() {
+            return Ok(());
+        }
+        let Some(runtime) = self.live.runtime.clone() else {
+            return Ok(());
+        };
+        let providers = self
+            .config
+            .providers
+            .iter()
+            .map(|(id, provider)| (id.clone(), provider.clone()))
+            .collect::<Vec<_>>();
+        let (sender, receiver) = oneshot::channel();
+        runtime.spawn(async move {
+            let mut results = Vec::with_capacity(providers.len());
+            match backend::client() {
+                Ok(client) => {
+                    results = futures::future::join_all(providers.into_iter().map(
+                        |(provider_id, provider)| {
+                            let client = &client;
+                            async move {
+                                let result = crate::provider::discover(client, &provider)
+                                    .await
+                                    .map_err(|_| {
+                                        "Model discovery failed; verify endpoint, credential, and /models support"
+                                            .into()
+                                    });
+                                (provider_id, result)
+                            }
+                        },
+                    ))
+                    .await;
+                }
+                Err(_) => {
+                    results.extend(providers.into_iter().map(|(provider_id, _)| {
+                        (
+                            provider_id,
+                            Err("Could not initialize provider client".into()),
+                        )
+                    }));
+                }
+            }
+            let _ = sender.send(results);
+        });
+        self.live.discovery = Some(Discovery {
+            receiver,
+            purpose: DiscoveryPurpose::Picker,
+        });
+        if let Some(picker) = &mut self.model_picker {
+            picker.refreshing = true;
+        }
         Ok(())
     }
 
@@ -428,19 +491,34 @@ impl App {
     fn poll_discovery(&mut self) -> bool {
         let result = match self.live.discovery.as_mut() {
             Some(discovery) => match discovery.receiver.try_recv() {
-                Ok(result) => Some((discovery.provider_id.clone(), result)),
+                Ok(result) => Some((discovery.purpose.clone(), result)),
                 Err(tokio::sync::oneshot::error::TryRecvError::Empty) => None,
-                Err(_) => Some((
-                    discovery.provider_id.clone(),
-                    Err("Model discovery stopped".into()),
-                )),
+                Err(_) => Some((discovery.purpose.clone(), Vec::new())),
             },
             None => None,
         };
-        let Some((provider_id, result)) = result else {
+        let Some((purpose, results)) = result else {
             return false;
         };
         self.live.discovery = None;
+        match purpose {
+            DiscoveryPurpose::Connect(provider_id) => {
+                let result = results
+                    .into_iter()
+                    .find_map(|(id, result)| (id == provider_id).then_some(result))
+                    .unwrap_or_else(|| Err("Model discovery stopped".into()));
+                self.finish_provider_discovery(provider_id, result);
+            }
+            DiscoveryPurpose::Picker => self.finish_picker_discovery(results),
+        }
+        true
+    }
+
+    fn finish_provider_discovery(
+        &mut self,
+        provider_id: String,
+        result: Result<Vec<String>, String>,
+    ) {
         match result {
             Ok(models) if !models.is_empty() => {
                 if let Some(provider) = self.config.providers.get_mut(&provider_id) {
@@ -473,7 +551,43 @@ impl App {
                 ),
             ),
         }
-        true
+    }
+
+    fn finish_picker_discovery(&mut self, results: DiscoveryResults) {
+        let total = results.len();
+        let mut refreshed = 0;
+        for (provider_id, result) in results {
+            if let Ok(models) = result
+                && let Some(provider) = self.config.providers.get_mut(&provider_id)
+            {
+                provider.models = models;
+                refreshed += 1;
+            }
+        }
+        self.refresh_open_model_picker();
+        if refreshed == 0 {
+            self.notify(
+                Level::Warning,
+                "Provider model refresh failed; showing cached models",
+            );
+        } else if let Err(error) = self.config.save() {
+            self.notify(
+                Level::Warning,
+                format!("Models refreshed but config save failed: {error:#}"),
+            );
+        } else if refreshed < total {
+            self.notify(
+                Level::Warning,
+                format!(
+                    "Refreshed models from {refreshed} of {total} providers; failed providers kept cached models"
+                ),
+            );
+        } else {
+            self.notify(
+                Level::Success,
+                format!("Refreshed models from {refreshed} provider(s)"),
+            );
+        }
     }
 
     fn fail_live(&mut self, error: &str) {

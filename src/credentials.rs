@@ -18,11 +18,6 @@ pub fn resolve(reference: &Credential) -> Result<SecretString> {
     let value = if let Some(name) = &reference.env {
         std::env::var(name)
             .with_context(|| format!("Credential environment variable {name} is not set"))?
-    } else if let Some(name) = &reference.keyring {
-        keyring::Entry::new("queditor", name)
-            .context("OS keyring is unavailable")?
-            .get_password()
-            .context("Credential was not found in the OS keyring")?
     } else if let Some(name) = &reference.file {
         read_file()?
             .credentials
@@ -37,13 +32,6 @@ pub fn resolve(reference: &Credential) -> Result<SecretString> {
     Ok(SecretString::from(value))
 }
 
-pub fn save_keyring(name: &str, secret: &SecretString) -> Result<()> {
-    keyring::Entry::new("queditor", name)
-        .context("OS keyring is unavailable")?
-        .set_password(secret.expose_secret())
-        .context("Could not save credential in OS keyring")
-}
-
 pub fn save_file(name: &str, secret: &SecretString) -> Result<()> {
     validate_name(name)?;
     let mut values = read_file()?;
@@ -55,12 +43,6 @@ pub fn save_file(name: &str, secret: &SecretString) -> Result<()> {
 }
 
 pub fn delete(reference: &Credential) -> Result<()> {
-    if let Some(name) = &reference.keyring {
-        match keyring::Entry::new("queditor", name)?.delete_credential() {
-            Ok(()) | Err(keyring::Error::NoEntry) => {}
-            Err(error) => return Err(error.into()),
-        }
-    }
     if let Some(name) = &reference.file {
         let mut values = read_file()?;
         values.credentials.remove(name);

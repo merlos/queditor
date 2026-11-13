@@ -16,7 +16,7 @@ library. Never imply mock responses are live AI or every provider is account-tes
 - `src/config.rs`: embedded defaults, YAML profiles, semantic theme colors.
 - `src/backend.rs`: genai streaming/tool loop, provider usage/timing, budgets, timeouts, sanitized errors.
 - `src/provider.rs`: validated provider endpoints, model discovery, exact genai targets.
-- `src/credentials.rs`: environment/keyring/private-file secret resolution and storage.
+- `src/credentials.rs`: environment/private-file secret resolution and storage.
 - `src/live.rs`: async job lifecycle, snapshot validation, permission/state orchestration.
 - `src/review.rs`: already-applied edit ranges, manual-edit rebasing, protected Keep/Undo state.
 - `src/tools.rs`: exact-path/URL grants, sensitive exclusions, anchored file and prepared web capabilities.

@@ -1687,7 +1687,7 @@ fn connect(frame: &mut Frame, app: &mut App) {
                             } else {
                                 " "
                             },
-                            ["K", "E", "F"][index],
+                            ["E", "F"][index],
                             source
                         ),
                         Style::default().fg(if index == wizard.credential_selected {
@@ -1748,12 +1748,6 @@ fn connect(frame: &mut Frame, app: &mut App) {
             "Variable name, e.g. OPENAI_API_KEY · Enter: connect",
             wizard.input.clone(),
             false,
-        ),
-        ConnectStep::SecretKeyring => (
-            " API key → OS keyring ",
-            "Type or terminal-paste key; it stays masked and out of config.yaml · Enter: connect",
-            wizard.secret.clone(),
-            true,
         ),
         ConnectStep::SecretFile => (
             " API key → credentials.yaml ",
@@ -1844,7 +1838,6 @@ fn connect(frame: &mut Frame, app: &mut App) {
             | ConnectStep::Name
             | ConnectStep::Endpoint
             | ConnectStep::Env
-            | ConnectStep::SecretKeyring
             | ConnectStep::SecretFile
     ) {
         let field_width = popup.width.saturating_sub(2);
@@ -1956,7 +1949,11 @@ fn model_picker(frame: &mut Frame, app: &mut App) {
     );
     app.popup_choice_start = start;
     let mut lines = vec![Line::styled(
-        "Which model do you want to use?",
+        if picker.refreshing {
+            "Which model do you want to use? · Refreshing provider models…"
+        } else {
+            "Which model do you want to use?"
+        },
         Style::default()
             .fg(app.theme.accent)
             .add_modifier(Modifier::BOLD),

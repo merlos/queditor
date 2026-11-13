@@ -8,7 +8,10 @@ plus gateways and OpenAI-compatible services. Library support is not a guarantee
 that every model supports tools or every provider account has been tested.
 
 Mock mode remains the default. `/connect` provides guided provider setup and model
-discovery. `/models` opens a selector containing configured and discovered models.
+discovery. `/models` immediately opens a selector containing configured and cached
+discovered models, then refreshes each configured provider in the background. Successful
+responses replace that provider's cached entries, adding new models and removing models
+the provider no longer reports; a failed provider keeps its cached entries.
 `/models <provider::model>` also selects and remembers a live model;
 `/models mock` returns to offline mode. Use a model available to your account.
 Discovery uses the provider's model-list API and can fail even when manual model use
@@ -42,16 +45,16 @@ recovery: true
 ## Credentials and endpoints
 
 Run `/connect` and choose OpenAI, Anthropic, Gemini, OpenRouter, or Custom
-OpenAI-compatible. Credential choices are the OS keyring, an environment-variable
-reference, or a private plaintext fallback. API-key input is masked and never enters
+OpenAI-compatible. Credential choices are an environment-variable reference or a
+private plaintext fallback. API-key input is masked and never enters
 chat, session, or recovery history.
 
 Environment credentials use names inherited by `queditor`. Common names include
 `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `GEMINI_API_KEY`, `GROQ_API_KEY`, and
 `OPEN_ROUTER_API_KEY`.
 Do not put key values in `config.yaml` or agent Markdown. `/connect` stores only the
-environment-variable/keyring/file reference there. Keyring is preferred. The
-`credentials.yaml` fallback is mode 0600 on Unix but remains unencrypted plaintext.
+environment-variable or file reference there. The `credentials.yaml` fallback is mode
+0600 on Unix but remains unencrypted plaintext.
 
 Local Ollama normally needs no key; install/start Ollama separately and download
 the desired model before selecting `ollama::<model-name>`.

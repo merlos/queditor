@@ -50,16 +50,15 @@ providers:
     models: [coder]
 ```
 
-Exactly one credential source is required: `env`, `keyring`, or `file`. `env`
+Exactly one credential source is required: `env` or `file`. `env`
 contains the environment variable's **name**, not its value. For example,
 `env: OPENAI_API_KEY` resolves the
 current value when a request starts, so key rotation does not require a config edit.
 
-Never place a raw key in `config.yaml`. Keyring references are stored by the OS under
-the `queditor` service. File references point to an entry in `credentials.yaml` in
-the same configuration directory. That fallback is unencrypted plaintext, created
+Never place a raw key in `config.yaml`. File references point to an entry in
+`credentials.yaml` in the same configuration directory. That fallback is unencrypted plaintext, created
 atomically with mode 0600 on Unix; Queditor rejects a permissive or symlinked file.
-Use `/connect delete <provider-id>` to remove a provider and its keyring/file secret.
+Use `/connect delete <provider-id>` to remove a provider and its file secret.
 Environment variables are never modified by Queditor.
 
 ## Editing bindings

@@ -119,8 +119,8 @@ entering the UI. `queditor --help` shows CLI options.
 
 Run `/connect`, choose OpenAI, Anthropic, Gemini, OpenRouter, or a custom
 OpenAI-compatible endpoint, and choose where Queditor should resolve the API key.
-Keys can remain in an environment variable, be saved in the OS keyring, or—with an
-explicit plaintext warning—be saved in private `credentials.yaml`. Queditor then
+Keys can remain in an environment variable or—with an explicit plaintext warning—be
+saved in private `credentials.yaml`. Queditor then
 discovers account models where the provider supports it and opens `/models`.
 
 You can still select or enter a model directly, for example

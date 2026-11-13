@@ -143,8 +143,6 @@ pub struct Credential {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub env: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub keyring: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub file: Option<String>,
 }
 
@@ -173,7 +171,6 @@ fn validate_provider(id: &str, provider: &Provider) -> Result<()> {
     }
     let credential_sources = [
         provider.credential.env.is_some(),
-        provider.credential.keyring.is_some(),
         provider.credential.file.is_some(),
     ]
     .into_iter()
@@ -190,13 +187,7 @@ fn validate_provider(id: &str, provider: &Provider) -> Result<()> {
     {
         bail!("Provider {id} has an invalid environment variable name");
     }
-    for name in [
-        provider.credential.keyring.as_deref(),
-        provider.credential.file.as_deref(),
-    ]
-    .into_iter()
-    .flatten()
-    {
+    for name in [provider.credential.file.as_deref()].into_iter().flatten() {
         if name.is_empty()
             || name.len() > 64
             || !name
@@ -443,6 +434,13 @@ mod tests {
     #[test]
     fn rejects_unknown_fields() {
         assert!(serde_yaml_ng::from_str::<Config>("typo: true").is_err());
+    }
+    #[test]
+    fn rejects_removed_keyring_credential_source() {
+        assert!(
+            serde_yaml_ng::from_str::<Credential>("keyring: provider-key").is_err(),
+            "keyring credentials are no longer supported"
+        );
     }
     #[test]
     fn validates_provider_namespaces_and_keeps_mock_default() {

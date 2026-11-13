@@ -28,7 +28,7 @@ It uses `String` plus bounded snapshots rather than a rope; measure large-file
 latency before switching storage. `backend` runs genai streaming and tool rounds
 on Tokio, communicating through bounded channels with `live` orchestration.
 `provider` validates endpoint profiles and creates exact genai targets; `credentials`
-resolves environment, OS-keyring, and private-file references without exposing keys.
+resolves environment and private-file references without exposing keys.
 `tools` prepares anchored filesystem capabilities before permission waits, without
 reading text and prepares exact-URL web capabilities without DNS/network access.
 `web` performs approved, bounded public HTTP(S) GETs with validated/pinned DNS,

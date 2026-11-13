@@ -11,7 +11,6 @@ clap = { version = "4", features = ["derive"] }
 crossterm = "0.28"
 genai = "0.7"
 futures = "0.3"
-keyring = "4.2"
 reqwest = { version = "0.13", default-features = false, features = ["rustls", "gzip", "system-proxy"] }
 secrecy = "0.10"
 tokio = { version = "1", features = ["rt-multi-thread", "sync", "time", "macros", "net"] }
