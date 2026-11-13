@@ -1939,11 +1939,11 @@ fn model_picker(frame: &mut Frame, app: &mut App) {
         w,
         h,
     );
-    let visible = usize::from(h.saturating_sub(3));
+    let visible = usize::from(h.saturating_sub(4));
     let start = picker.selected.saturating_sub(visible.saturating_sub(1));
     app.popup_choice_area = Rect::new(
         popup.x.saturating_add(1),
-        popup.y.saturating_add(2),
+        popup.y.saturating_add(3),
         popup.width.saturating_sub(2),
         (picker.models.len().saturating_sub(start).min(visible)) as u16,
     );
@@ -1958,6 +1958,16 @@ fn model_picker(frame: &mut Frame, app: &mut App) {
             .fg(app.theme.accent)
             .add_modifier(Modifier::BOLD),
     )];
+    lines.push(Line::styled(
+        format!("Search: {}", safe(&picker.query)),
+        Style::default().fg(app.theme.fg),
+    ));
+    if picker.models.is_empty() {
+        lines.push(Line::styled(
+            "  No matching models",
+            Style::default().fg(app.theme.muted),
+        ));
+    }
     lines.extend(
         picker
             .models
@@ -1987,11 +1997,13 @@ fn model_picker(frame: &mut Frame, app: &mut App) {
             .block(
                 Block::default()
                     .borders(Borders::ALL)
-                    .title(" Models · Enter select · Esc close "),
+                    .title(" Models · Type to search · Enter select · Esc close "),
             )
             .style(Style::default().bg(app.theme.bg)),
         popup,
     );
+    let query_width = display_width(&picker.query).min(usize::from(popup.width.saturating_sub(11)));
+    frame.set_cursor_position((popup.x + 9 + query_width as u16, popup.y + 2));
 }
 
 fn recovery_picker(frame: &mut Frame, app: &mut App) {

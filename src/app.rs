@@ -307,7 +307,9 @@ pub enum ConnectStep {
 }
 
 pub struct ModelPicker {
+    pub all_models: Vec<String>,
     pub models: Vec<String>,
+    pub query: String,
     pub selected: usize,
     pub scroll: usize,
     pub refreshing: bool,
@@ -1396,7 +1398,9 @@ impl App {
     pub fn open_model_picker(&mut self) {
         let models = self.model_choices();
         self.model_picker = Some(ModelPicker {
+            all_models: models.clone(),
             models,
+            query: String::new(),
             selected: 0,
             scroll: 0,
             refreshing: false,
@@ -1429,12 +1433,16 @@ impl App {
         };
         let selected = picker.models.get(picker.selected).cloned();
         let previous_index = picker.selected;
+        let query = picker.query.clone();
         let models = self.model_choices();
+        let filtered_models = filter_models(&models, &query);
         let selected = selected
-            .and_then(|selected| models.iter().position(|model| model == &selected))
-            .unwrap_or_else(|| previous_index.min(models.len().saturating_sub(1)));
+            .and_then(|selected| filtered_models.iter().position(|model| model == &selected))
+            .unwrap_or_else(|| previous_index.min(filtered_models.len().saturating_sub(1)));
         self.model_picker = Some(ModelPicker {
-            models,
+            all_models: models,
+            models: filtered_models,
+            query,
             selected,
             scroll: 0,
             refreshing: false,
@@ -1451,8 +1459,26 @@ impl App {
             KeyCode::Down => {
                 picker.selected = (picker.selected + 1).min(picker.models.len().saturating_sub(1))
             }
+            KeyCode::Backspace => {
+                picker.query.pop();
+                picker.models = filter_models(&picker.all_models, &picker.query);
+                picker.selected = 0;
+                picker.scroll = 0;
+            }
+            KeyCode::Char(c)
+                if !key
+                    .modifiers
+                    .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) =>
+            {
+                picker.query.push(c);
+                picker.models = filter_models(&picker.all_models, &picker.query);
+                picker.selected = 0;
+                picker.scroll = 0;
+            }
             KeyCode::Enter => {
-                let model = picker.models[picker.selected].clone();
+                let Some(model) = picker.models.get(picker.selected).cloned() else {
+                    return;
+                };
                 self.model_picker = None;
                 if let Err(error) = self.select_model(model) {
                     self.notify(Level::Error, format!("Could not remember model: {error:#}"));
@@ -2700,6 +2726,15 @@ impl App {
     }
 }
 
+fn filter_models(models: &[String], query: &str) -> Vec<String> {
+    let query = query.to_lowercase();
+    models
+        .iter()
+        .filter(|model| model.to_lowercase().contains(&query))
+        .cloned()
+        .collect()
+}
+
 impl AgentMode {
     pub fn label(self) -> &'static str {
         match self {
@@ -3913,6 +3948,50 @@ mod tests {
         });
         assert_eq!(a.config.model, expected);
         assert!(a.model_picker.is_none());
+    }
+
+    #[test]
+    fn model_picker_filters_case_insensitive_substrings_as_the_user_types() {
+        let mut a = app();
+        a.config.models = vec![
+            "provider::alpha-coder".into(),
+            "provider::beta-chat".into(),
+            "other::CODER-large".into(),
+        ];
+        a.open_model_picker();
+
+        for c in "coder".chars() {
+            a.key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE));
+        }
+        let picker = a.model_picker.as_ref().unwrap();
+        assert_eq!(picker.query, "coder");
+        assert_eq!(
+            picker.models,
+            vec!["other::CODER-large", "provider::alpha-coder"]
+        );
+
+        a.key(KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE));
+        assert_eq!(a.model_picker.as_ref().unwrap().query, "code");
+    }
+
+    #[test]
+    fn model_picker_search_handles_no_matches_and_refreshes_filtered_results() {
+        let mut a = app();
+        a.config.models = vec!["provider::old-chat".into()];
+        a.open_model_picker();
+        for c in "new".chars() {
+            a.key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE));
+        }
+        assert!(a.model_picker.as_ref().unwrap().models.is_empty());
+
+        a.key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert!(a.model_picker.is_some());
+        a.config.models.push("provider::new-chat".into());
+        a.refresh_open_model_picker();
+
+        let picker = a.model_picker.as_ref().unwrap();
+        assert_eq!(picker.query, "new");
+        assert_eq!(picker.models, vec!["provider::new-chat"]);
     }
 
     #[test]

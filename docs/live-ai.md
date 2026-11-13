@@ -11,7 +11,8 @@ Mock mode remains the default. `/connect` provides guided provider setup and mod
 discovery. `/models` immediately opens a selector containing configured and cached
 discovered models, then refreshes each configured provider in the background. Successful
 responses replace that provider's cached entries, adding new models and removing models
-the provider no longer reports; a failed provider keeps its cached entries.
+the provider no longer reports; a failed provider keeps its cached entries. Typing in
+the selector filters identifiers by a case-insensitive match anywhere in the string.
 `/models <provider::model>` also selects and remembers a live model;
 `/models mock` returns to offline mode. Use a model available to your account.
 Discovery uses the provider's model-list API and can fail even when manual model use

@@ -172,8 +172,9 @@ selection or pinned attachment and committed history to the selected provider.
 
 `/new` clears active chat/context/temporary grants but keeps the open document.
 `/models` immediately lists configured and cached models while refreshing provider lists
-in the background; the open picker updates when results arrive. `/models <provider::model>`
-selects and remembers one.
+in the background; the open picker updates when results arrive. Type in the picker to
+filter model identifiers by a case-insensitive match anywhere in the string; Backspace
+removes search characters. `/models <provider::model>` selects and remembers one.
 `/models mock` returns to offline mode. `/compact` summarizes committed live
 history while retaining the visible transcript. `/cancel` stops an active request.
 Optional persistence and recovery are described in [live AI](live-ai.md).
