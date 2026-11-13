@@ -16,6 +16,32 @@ use tokio::sync::{mpsc, oneshot};
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(60);
 const STREAM_TIMEOUT: Duration = Duration::from_secs(1800);
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(1800);
+const MAX_GENERATIONS: usize = 100;
+const MAX_TOOL_CALLS: usize = 100;
+
+#[derive(Default)]
+struct TurnBudget {
+    generations: usize,
+    tool_calls: usize,
+}
+
+impl TurnBudget {
+    fn next_generation(&mut self) -> Result<()> {
+        if self.generations >= MAX_GENERATIONS {
+            bail!("Agent exceeded the {MAX_GENERATIONS}-generation limit; no edits applied");
+        }
+        self.generations += 1;
+        Ok(())
+    }
+
+    fn record_tool_call(&mut self) -> Result<()> {
+        if self.tool_calls >= MAX_TOOL_CALLS {
+            bail!("Agent exceeded the {MAX_TOOL_CALLS}-tool-call limit; no edits applied");
+        }
+        self.tool_calls += 1;
+        Ok(())
+    }
+}
 
 pub struct Request {
     pub model: String,
@@ -172,9 +198,10 @@ async fn conversation(request: Request, sender: &mpsc::Sender<Event>) -> Result<
         .with_stream_header_timeout(STREAM_TIMEOUT)
         .with_stream_read_timeout(STREAM_TIMEOUT);
     let mut total = 0;
-    let mut tool_count = 0;
+    let mut budget = TurnBudget::default();
     let mut proposed = false;
-    for _ in 0..8 {
+    loop {
+        budget.next_generation()?;
         sender.send(Event::RequestStarted).await?;
         let started = Instant::now();
         let mut stream = client
@@ -254,10 +281,7 @@ async fn conversation(request: Request, sender: &mpsc::Sender<Event>) -> Result<
             if call.size() > MAX_CONTEXT_BYTES {
                 bail!("Tool call exceeds 256 KiB");
             }
-            tool_count += 1;
-            if tool_count > 12 {
-                bail!("Agent exceeded the 12-tool-call limit");
-            }
+            budget.record_tool_call()?;
             let result = if call.fn_name == "propose_edit" {
                 if !request.allow_edits {
                     Err(anyhow::anyhow!(
@@ -330,7 +354,6 @@ async fn conversation(request: Request, sender: &mpsc::Sender<Event>) -> Result<
             )));
         }
     }
-    bail!("Agent exceeded the eight-generation limit")
 }
 
 fn string_arg<'a>(value: &'a Value, name: &str) -> Result<&'a str> {
@@ -349,6 +372,38 @@ fn string_arg<'a>(value: &'a Value, name: &str) -> Result<&'a str> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn turn_budget_allows_long_tool_sequences_and_a_final_response() {
+        let mut budget = TurnBudget::default();
+        for _ in 0..99 {
+            budget.next_generation().unwrap();
+            budget.record_tool_call().unwrap();
+        }
+        // A tool-free final response is still allowed on the hundredth generation.
+        budget.next_generation().unwrap();
+        assert_eq!(budget.generations, 100);
+        assert_eq!(budget.tool_calls, 99);
+        let error = budget.next_generation().unwrap_err().to_string();
+        assert!(error.contains("100-generation limit"));
+        assert!(error.contains("no edits applied"));
+        assert_eq!(budget.generations, 100);
+    }
+
+    #[test]
+    fn turn_budget_bounds_multiple_tool_calls_per_generation() {
+        let mut budget = TurnBudget::default();
+        budget.next_generation().unwrap();
+        for _ in 0..100 {
+            budget.record_tool_call().unwrap();
+        }
+        let error = budget.record_tool_call().unwrap_err().to_string();
+        assert!(error.contains("100-tool-call limit"));
+        assert!(error.contains("no edits applied"));
+        assert_eq!(budget.tool_calls, 100);
+        // Exhausting tool calls does not prevent a tool-free final response.
+        budget.next_generation().unwrap();
+    }
 
     #[test]
     fn live_timeouts_allow_slow_providers_and_permission_waits() {

@@ -152,7 +152,13 @@ marked incomplete/cancelled and is not committed as model history. Cancellation
 cannot undo provider processing or earlier transmissions, or revert a completed saved
 edit. Use review Undo for pending saved changes.
 
-Limits: 8 generation rounds, 12 tool calls, 256 KiB attachments/open documents/file
+Limits per prompt: 100 generation rounds and 100 tool calls. A generation round is
+one model response; after executing its tool calls, Queditor asks the model again
+with the results. The final answer also counts as a round. These caps prevent runaway
+loops, not account usage; longer runs can consume more tokens. Reaching either cap
+fails the request without applying pending edits.
+
+Other limits: 256 KiB attachments/open documents/file
 reads/web responses/proposed replacements, 1000 directory entries, 1 MiB generated/tool context, 60-second
 provider connection waits, thirty-minute header/stream-read waits, and a thirty-minute total deadline including permission
 waits. No automatic retries, avoiding duplicate actions/billing.
