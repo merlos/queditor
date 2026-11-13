@@ -157,6 +157,9 @@ Ctrl+G cycles only the selected agent's mode; `/mode chat` and `/mode agent`
 select explicitly. Rotation saves the agent and mode together; if saving fails,
 neither changes. Each agent's mode, the selected agent, and the model are saved
 to `config.yaml` and restored on the next launch.
+On the first launch in a pristine environment, Planner starts in Agent mode and
+the agent panel has keyboard focus. Later launches restore the user's saved agent
+and mode selections.
 `/agents` then Enter opens an agent picker with names and descriptions. Use Up/Down
 and Enter, or click a row, to select and remember an agent. Escape closes without
 changing the agent. `/agents <name>` selects directly without opening the popup.

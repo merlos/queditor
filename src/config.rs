@@ -27,7 +27,7 @@ impl Default for Config {
             theme: "mocha".into(),
             keybindings: "vscode".into(),
             agent: "Planner".into(),
-            agent_modes: BTreeMap::new(),
+            agent_modes: BTreeMap::from([("Planner".into(), AgentMode::Agent)]),
             model: "mock".into(),
             models: vec!["mock".into()],
             providers: BTreeMap::new(),
@@ -429,6 +429,7 @@ mod tests {
         let c: Config = serde_yaml_ng::from_str("theme: daylight").unwrap();
         assert_eq!(c.keybindings, "vscode");
         assert_eq!(c.agent, "Planner");
+        assert_eq!(c.agent_modes["Planner"], AgentMode::Agent);
         assert_eq!(c.schema_version, 1);
     }
     #[test]

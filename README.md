@@ -56,6 +56,8 @@ entering the UI. `queditor --help` shows CLI options.
 
 ## Quick start
 
+- On a pristine first launch, the agent panel is focused and Planner starts in
+  Agent mode. Later launches restore your saved agent and mode selection.
 - Type in the editor; use arrows and Shift+arrows to move/select.
 - **Tab** switches panes. **Ctrl+S** saves; **Ctrl+Q** exits safely.
 - In chat, **Enter** submits and **Ctrl+J** inserts a newline. Shift+Enter also

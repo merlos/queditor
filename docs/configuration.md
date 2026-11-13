@@ -10,7 +10,8 @@ schema_version: 1
 theme: mocha           # mocha or daylight
 keybindings: vscode    # vscode, emacs, or a custom profile filename
 agent: Planner         # last selected built-in or custom agent
-agent_modes: {}        # remembered chat/agent mode by agent name
+agent_modes:            # remembered chat/agent mode by agent name
+  Planner: agent        # pristine-install default
 model: mock            # or a genai provider::model identifier
 models: [mock]         # suggestions shown by /models
 providers: {}          # connections created by /connect
@@ -22,7 +23,9 @@ Missing fields inherit embedded defaults. Unknown fields, invalid themes, and
 unsupported schema versions warn and fall back to safe defaults. A bad binding
 profile falls back to vscode. Model, agent, and each agent's Chat/Agent mode are
 saved immediately and restored on the next launch; a removed custom agent falls
-back to Planner. Agents without a saved mode default to read-only Chat mode.
+back to Planner. A pristine environment starts with Planner in Agent mode. After
+the user selects a mode, that saved selection is restored as before. Other agents
+without a saved mode default to read-only Chat mode.
 Live Agent mode automatically applies and saves completed edits before Keep/Undo
 review, including existing unsaved text. There is no approval-before-save option.
 Unnamed documents use private temporary backing until Ctrl+S/Save As chooses a real

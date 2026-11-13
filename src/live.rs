@@ -1414,6 +1414,7 @@ mod tests {
         assert!(app.review.is_none());
         assert_eq!(app.document.text, "hello");
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "hello");
+        app.focus = crate::app::Focus::Editor;
         app.document.move_to(5, false);
         app.key(crossterm::event::KeyEvent::new(
             crossterm::event::KeyCode::Char('a'),

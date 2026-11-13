@@ -367,7 +367,7 @@ impl App {
             theme: Theme::named(&config.theme),
             config,
             bindings,
-            focus: Focus::Editor,
+            focus: Focus::Chat,
             workspace,
             messages: vec![],
             composer: String::new(),
@@ -3455,6 +3455,7 @@ mod tests {
     #[test]
     fn manual_edit_preserves_user_work_and_closes_review() {
         let mut a = app();
+        a.focus = Focus::Editor;
         a.document.insert("hello");
         a.proposal = Some(Proposal::new(
             false,
@@ -3488,6 +3489,14 @@ mod tests {
         assert_eq!(a.agent_mode(), AgentMode::Agent);
         a.agent = 1;
         assert_eq!(a.agent_mode(), AgentMode::Chat);
+    }
+
+    #[test]
+    fn pristine_startup_uses_planner_agent_mode_and_focuses_agent_panel() {
+        let a = app();
+        assert!(a.focus == Focus::Chat);
+        assert_eq!(a.agents[a.agent].name, "Planner");
+        assert_eq!(a.agent_mode(), AgentMode::Agent);
     }
 
     #[test]
@@ -3658,6 +3667,7 @@ mod tests {
     #[test]
     fn default_control_line_shortcuts_move_and_delete() {
         let mut a = app();
+        a.focus = Focus::Editor;
         a.document.insert("one two\nthree");
         a.document.move_to(5, false);
         a.key(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::CONTROL));
