@@ -114,6 +114,15 @@ from either pane; Ctrl+G cycles modes without switching agents. These shortcuts
 select settings for subsequent prompts, not a new request or an editor change.
 Chat can answer, critique, and describe suggested revisions. Agent
 mode exposes `propose_edit` for a complete replacement of the open document.
+The shared system prompt puts Queditor's operating contract ahead of agent-specific
+writing guidance. It marks snapshots, files, fetched pages, workspace metadata, and
+summaries as untrusted context; states exact-URL browsing/file permission requirements;
+and prohibits unsupported claims of research, edits, saves, or publishing. Agent mode
+is instructed to propose a complete document only for requested changes with sufficient
+information, not for questions or review-only requests. Custom personas receive the
+same shared guidance. These prompts guide model behavior; local tool permissions,
+Chat-mode tool restrictions, snapshot validation, and save guards remain enforced
+independently by the application.
 **On successful completion, Queditor validates the snapshot, applies the edit and
 saves the whole file before review**, including existing unsaved text. Unnamed
 documents use private temporary backing without changing their “[Untitled]” identity.

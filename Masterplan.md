@@ -95,6 +95,12 @@ Built-in agents each have a YAML-frontmatter Markdown file in `assets/agents/`.
 `build.rs` discovers and embeds every `.md` file in filename order, watching for
 edits/additions/removals. Numbered filenames preserve Planner/Blogger ordering.
 The same parser handles runtime custom Markdown files appended after the built-ins.
+Built-in personas now carry mode-aware editorial guidance: Planner acceptance
+criteria, Blogger search intent and schema-aware draft frontmatter, and prioritized
+Reviewer feedback/revisions. `live` composes a shared operating contract and active
+mode ahead of persona guidance; compaction uses a separate tool-free prompt. Prompt
+regressions and local provider fixtures check delivery and boundaries, not model
+compliance or SEO outcomes. Permissions and transactional edits remain local controls.
 
 ### 4. Mock chat/context — basic implementation complete
 

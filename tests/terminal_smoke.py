@@ -393,6 +393,38 @@ class FakeProvider:
 
 
 class LiveSmokeTests(unittest.TestCase):
+    def test_blogger_system_guidance_reaches_provider_with_chat_and_agent_contracts(self):
+        for mode in ("chat", "agent"):
+            with self.subTest(mode=mode), tempfile.TemporaryDirectory(prefix="queditor-blogger-prompt-") as directory:
+                root = Path(directory)
+                doc = root / "post.md"
+                original = "---\ntitle: Existing draft\ndraft: true\ncustom: keep\n---\n\nOriginal article.\n"
+                doc.write_text(original)
+                note = root / "note.md"
+                note.write_text("NOT_APPROVED")
+                config = root / "config"
+                (config / "queditor").mkdir(parents=True)
+                (config / "queditor/config.yaml").write_text("model: genai_1::test\n")
+                provider = FakeProvider(note, deny=True)
+                self.addCleanup(provider.close)
+                app = TerminalApp(doc, config, extra_env={"GENAI_1_ENDPOINT": provider.endpoint, "GENAI_1_API_KEY": "local-test-placeholder"}, backend=b"genai_1::test", start_in_editor=False)
+                self.addCleanup(app.close)
+                app.send(b"/agents Blogger\r", b"Agent selected and remembered: Blogger")
+                app.send(f"/mode {mode}\r".encode(), f"{mode.upper()} mode selected".encode())
+                app.send(b"Review this blog's metadata and structure.\r", b"Agent file permission")
+                messages = provider.requests[0]["messages"]
+                system = "\n".join(message["content"] for message in messages if message["role"] in ("system", "developer"))
+                for rule in ("search intent", "valid YAML frontmatter", "draft: true", "unknown fields", "takes precedence", "exact URL", "untrusted data"):
+                    self.assertIn(rule, system)
+                names = [tool["function"]["name"] for tool in provider.requests[0]["tools"]]
+                self.assertEqual("propose_edit" in names, mode == "agent")
+                self.assertIn("CHAT (read-only)" if mode == "chat" else "Active mode: Queditor AGENT", system)
+                app.send(b"n", b"Agent finished")
+                self.assertNotIn("NOT_APPROVED", json.dumps(provider.requests))
+                self.assertEqual(doc.read_text(), original)
+                app.send(b"\x11")
+                app.finish()
+
     def test_webfetch_requests_permission_to_browse_and_denial_reaches_provider(self):
         with tempfile.TemporaryDirectory(prefix="queditor-web-permission-") as directory:
             root = Path(directory)

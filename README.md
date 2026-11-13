@@ -110,6 +110,8 @@ entering the UI. `queditor --help` shows CLI options.
 - Mocha/daylight themes, VS Code-style and Emacs-style editing presets.
 - YAML configuration and custom Markdown agent definitions.
 - Built-in agents in individual [Markdown files under `assets/agents/`](assets/agents/), embedded when compiled.
+- Mode-aware Planner/Reviewer guidance and SEO-aware Blogger prompts with schema-aware
+  draft frontmatter guidance; generated content still requires inspection.
 - Attached context snapshots, stale-edit checks, and manual-edit protection during review.
 - Temporary-file saves, newline preservation, and disk-change checks at save time.
 - Live streaming, cancellation, model switching, and conversation compaction.

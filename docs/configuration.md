@@ -113,6 +113,32 @@ add another (for example, `03-reviewer.md`) and rebuild Queditor—no Rust regis
 changes are needed. Installed binaries need no external copy of the files. This
 does not modify your home-directory configuration.
 
+### Built-in writing guidance
+
+- **Blogger** focuses on audience, voice, factual accuracy, search intent, natural
+  keywords, descriptive headings, and accessibility—not keyword stuffing or promises
+  of rankings. For a new complete blog post it is instructed to include valid YAML
+  frontmatter, following your publishing schema when supplied. Without a schema it
+  uses conservative draft fields: `title`, `description`, `slug`, `tags`, `draft: true`.
+  It preserves existing/unknown metadata and publication state, does not invent
+  authors, dates, or URLs, and does not add frontmatter to excerpts or unrelated text
+  unless requested. Supply a site-specific example when field names matter.
+- **Planner** separates requirements from assumptions and recommendations, and
+  produces scoped, actionable plans with dependencies, risks, and testable acceptance
+  criteria. It avoids invented approvals, deadlines, and unnecessary complexity.
+- **Reviewer** prioritizes accuracy, clarity, structure, consistency, and accessibility.
+  Essential corrections are distinguished from optional polish. Blog reviews may
+  include SEO/frontmatter checks; unrelated documents are not forced into a blog template.
+
+All three are mode-aware: Chat provides discussion or suggestions; Agent may make
+requested revisions through the structured edit tool. Asking only for review should
+not trigger speculative edits. Research requires local permission, and unsupported
+claims should be flagged. These are model instructions, not guaranteed output checks:
+inspect generated text, facts, and frontmatter before publishing. Mock mode does not
+run these prompts through a model.
+
+### Runtime custom agents
+
 For runtime custom agents, create `agents/copyeditor.md` beneath the configuration directory:
 
 ```markdown
@@ -121,8 +147,9 @@ name: Copyeditor
 description: Reviews clarity and consistency
 ---
 
-Preserve the writer's meaning and voice. Identify unclear passages and claims
-that need verification. Suggest changes rather than silently rewriting.
+Preserve the writer's meaning and voice. Flag claims needing verification.
+In Chat mode, suggest corrections. In Agent mode, make requested revisions
+through the structured edit tool; do not edit when asked only for feedback.
 ```
 
 Names must be nonempty and unique, including against all built-in definitions. Files with

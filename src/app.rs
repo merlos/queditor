@@ -2991,21 +2991,57 @@ fn key_name(key: KeyEvent) -> String {
 mod tests {
     use super::*;
     #[test]
-    fn embedded_default_agents_preserve_order_descriptions_and_prompts() {
+    fn embedded_default_agents_preserve_order_and_include_specialized_guidance() {
         let agents = Agent::defaults().unwrap();
         assert!(agents.len() >= 2);
         assert_eq!(agents[0].name, "Planner");
         assert_eq!(agents[0].description, "Specifications and plans");
-        assert_eq!(
-            agents[0].instructions,
-            "Clarify intent, assumptions, risks, and acceptance criteria."
-        );
+        for rule in [
+            "acceptance criteria",
+            "out of scope",
+            "assumptions",
+            "rollback",
+            "Chat mode",
+            "Agent mode",
+            "propose_edit",
+        ] {
+            assert!(agents[0].instructions.contains(rule), "{rule}");
+        }
         assert_eq!(agents[1].name, "Blogger");
-        assert_eq!(agents[1].description, "Blog drafts and revisions");
-        assert_eq!(
-            agents[1].instructions,
-            "Preserve voice, audience, and meaning. Flag claims needing verification."
-        );
+        assert_eq!(agents[1].description, "SEO-aware blog drafts and revisions");
+        for rule in [
+            "search intent",
+            "keyword stuffing",
+            "valid YAML frontmatter",
+            "title, description",
+            "slug, tags, and draft: true",
+            "existing frontmatter",
+            "unknown fields",
+            "publication dates",
+            "Do not add frontmatter to an excerpt",
+            "webfetch",
+            "Chat mode",
+            "Agent mode",
+            "propose_edit",
+        ] {
+            assert!(agents[1].instructions.contains(rule), "{rule}");
+        }
+        let reviewer = agents
+            .iter()
+            .find(|agent| agent.name == "Reviewer")
+            .unwrap();
+        for rule in [
+            "factual accuracy",
+            "optional polish",
+            "unknown metadata",
+            "unrelated documents",
+            "Chat mode",
+            "Agent mode",
+            "propose_edit",
+            "speculative edits",
+        ] {
+            assert!(reviewer.instructions.contains(rule), "{rule}");
+        }
     }
 
     #[test]
